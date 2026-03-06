@@ -134,9 +134,11 @@ async function buildSceneMaterial(
   if (mat instanceof PBRMetallicRoughnessMaterial) {
     return {
       baseColor: vec3FromColor(mat.baseColor, [1, 1, 1]),
+      emissive: vec3FromColor(mat.emissiveColor, [0, 0, 0]),
       metallic: clamp01(mat.metallic ?? 1),
       roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
       baseColorTexture: await buildTextureRef(mat.baseTexture, true, sceneTextures, textureMap),
+      emissiveTexture: await buildTextureRef(mat.emissiveTexture, true, sceneTextures, textureMap),
       metallicRoughnessTexture: await buildTextureRef(mat.metallicRoughnessTexture, false, sceneTextures, textureMap),
       normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
       normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
@@ -146,9 +148,11 @@ async function buildSceneMaterial(
   if (mat instanceof PBRMaterial) {
     return {
       baseColor: vec3FromColor(mat.albedoColor, [1, 1, 1]),
+      emissive: vec3FromColor(mat.emissiveColor, [0, 0, 0]),
       metallic: clamp01(mat.metallic ?? 1),
       roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
       baseColorTexture: await buildTextureRef(mat.albedoTexture, true, sceneTextures, textureMap),
+      emissiveTexture: await buildTextureRef(mat.emissiveTexture, true, sceneTextures, textureMap),
       metallicRoughnessTexture: await buildTextureRef(mat.metallicTexture, false, sceneTextures, textureMap),
       normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
       normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
@@ -158,15 +162,17 @@ async function buildSceneMaterial(
   if (mat instanceof StandardMaterial) {
     return {
       baseColor: vec3FromColor(mat.diffuseColor, [0.8, 0.8, 0.8]),
+      emissive: vec3FromColor(mat.emissiveColor, [0, 0, 0]),
       metallic: 0,
       roughness: 0.8,
       baseColorTexture: await buildTextureRef(mat.diffuseTexture, true, sceneTextures, textureMap),
+      emissiveTexture: await buildTextureRef(mat.emissiveTexture, true, sceneTextures, textureMap),
       normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
       normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
     };
   }
 
-  return { baseColor: [0.8, 0.8, 0.8], metallic: 0, roughness: 0.7 };
+  return { baseColor: [0.8, 0.8, 0.8], emissive: [0, 0, 0], metallic: 0, roughness: 0.7 };
 }
 
 async function meshToTriangles(

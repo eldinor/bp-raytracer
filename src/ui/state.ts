@@ -28,6 +28,8 @@ export type AppState = {
   fireflyClamp: number;
   fireflySuppression: number;
   specularSpikeClamp: number;
+  extremeSpikeKill: number;
+  sampleBoxEmissiveIntensity: number;
   normalStrength: number;
   workerCount: number;
   blendMix: number;

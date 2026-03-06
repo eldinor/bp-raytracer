@@ -1,6 +1,6 @@
 import type { Box, MaterialTextureRef, Plane, SerializedScene, Sphere, TriangleMesh, Vec2, Vec3 } from "../scene/types";
 import { TriangleBvh, type Hit, type Ray } from "./bvh";
-import { EPS, Rng, add, clamp01, dot, hash4, mul, normalize, sub } from "./math";
+import { EPS, Rng, add, clamp01, cross, dot, hash4, mul, normalize, sub } from "./math";
 
 export type RenderCamera = {
   pos: Vec3;
@@ -24,6 +24,7 @@ export type RenderSettings = {
   fireflyClamp?: number;
   fireflySuppression?: number;
   specularSpikeClamp?: number;
+  extremeSpikeKill?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
@@ -38,12 +39,34 @@ type HitRecord = Hit & { p: Vec3 };
 
 type PbrMaterial = {
   baseColor: Vec3;
+  emissive: Vec3;
   metallic: number;
   roughness: number;
   baseColorTexture?: MaterialTextureRef;
+  emissiveTexture?: MaterialTextureRef;
   metallicRoughnessTexture?: MaterialTextureRef;
   normalTexture?: MaterialTextureRef;
   normalScale: number;
+};
+
+type EmissiveLight =
+  | { type: "sphere"; sphere: Sphere; materialId: number; area: number; weight: number }
+  | { type: "box"; box: Box; materialId: number; area: number; weight: number }
+  | { type: "plane"; plane: Plane; materialId: number; area: number; weight: number }
+  | {
+      type: "triangles";
+      mesh: TriangleMesh;
+      triangleIndices: Uint32Array;
+      cdf: Float32Array;
+      totalArea: number;
+      weight: number;
+    };
+
+type EmissiveLightSample = {
+  position: Vec3;
+  normal: Vec3;
+  emission: Vec3;
+  pdf: number;
 };
 
 const PI = Math.PI;
@@ -54,6 +77,8 @@ const SHADOW_BIAS = 1e-2;
 const MAX_THROUGHPUT = 8.0;
 const DEFAULT_MAX_SAMPLE_LUMINANCE = 12.0;
 const MIN_RAYTRACE_ROUGHNESS = 0.06;
+const EMISSIVE_DIRECT_SAMPLES = 3;
+const EMISSIVE_DIRECT_MAX_GEOM = 2.5;
 const FIREFLY_NEIGHBOR_BOOST = 3.0;
 const FIREFLY_CENTER_WEIGHT = 0.15;
 const FIREFLY_TRIGGER_RATIO = 1.35;
@@ -102,6 +127,14 @@ function clampSecondaryContribution(v: Vec3, bounce: number, specularSpikeClamp:
   return clampLuminance(v, limit);
 }
 
+function clampEmissiveDirectContribution(v: Vec3, specularSpikeClamp: number, maxSampleLuminance: number): Vec3 {
+  return clampLuminance(v, Math.min(maxSampleLuminance, specularSpikeClamp * 0.7));
+}
+
+function mulScalar(a: Vec3, b: Vec3, s: number): Vec3 {
+  return [a[0] * b[0] * s, a[1] * b[1] * s, a[2] * b[2] * s];
+}
+
 function safeNormalize(v: Vec3): Vec3 {
   const l = Math.hypot(v[0], v[1], v[2]);
   return l > 0 ? [v[0] / l, v[1] / l, v[2] / l] : [0, 1, 0];
@@ -111,13 +144,19 @@ function getMaterial(scene: SerializedScene, materialId: number): PbrMaterial {
   const m = scene.materials[materialId];
   return {
     baseColor: m?.baseColor ?? [1, 1, 1],
+    emissive: m?.emissive ?? [0, 0, 0],
     metallic: Math.max(0, Math.min(1, m?.metallic ?? 0)),
     roughness: Math.max(MIN_RAYTRACE_ROUGHNESS, Math.min(1, m?.roughness ?? 0.7)),
     baseColorTexture: m?.baseColorTexture,
+    emissiveTexture: m?.emissiveTexture,
     metallicRoughnessTexture: m?.metallicRoughnessTexture,
     normalTexture: m?.normalTexture,
     normalScale: Math.max(0, m?.normalScale ?? 1)
   };
+}
+
+function emissivePower(mat: PbrMaterial): number {
+  return luminance(mat.emissive);
 }
 
 function intersectSphere(ray: Ray, s: Sphere, tMax: number): Hit | null {
@@ -255,9 +294,9 @@ function intersectScene(ray: Ray, scene: SerializedScene, triBvh: TriangleBvh | 
   return { ...best, p: add(ray.o, mul(ray.d, bestT)) };
 }
 
-function isOccluded(origin: Vec3, dir: Vec3, scene: SerializedScene, triBvh: TriangleBvh | null): boolean {
+function isOccluded(origin: Vec3, dir: Vec3, scene: SerializedScene, triBvh: TriangleBvh | null, maxT = 1e6): boolean {
   const shadowRay: Ray = { o: origin, d: dir };
-  return intersectScene(shadowRay, scene, triBvh, 1e6) !== null;
+  return intersectScene(shadowRay, scene, triBvh, maxT) !== null;
 }
 
 function toSrgb8(x: number): number {
@@ -332,6 +371,7 @@ function sampleTextureRgba(scene: SerializedScene, texRef: MaterialTextureRef, u
 
 function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: Vec2, uv1: Vec2): PbrMaterial {
   let baseColor = mat.baseColor;
+  let emissive = mat.emissive;
   let metallic = mat.metallic;
   let roughness = mat.roughness;
 
@@ -350,12 +390,244 @@ function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: 
     metallic = clamp01(metallic * tex[2]);
   }
 
+  if (mat.emissiveTexture) {
+    const tex = sampleTextureRgba(scene, mat.emissiveTexture, uv0, uv1);
+    emissive = [emissive[0] * tex[0], emissive[1] * tex[1], emissive[2] * tex[2]];
+  }
+
   return {
     baseColor,
+    emissive,
     metallic,
     roughness,
+    emissiveTexture: mat.emissiveTexture,
     normalTexture: mat.normalTexture,
     normalScale: mat.normalScale
+  };
+}
+
+function buildEmissiveLights(scene: SerializedScene): { lights: EmissiveLight[]; totalWeight: number } {
+  const lights: EmissiveLight[] = [];
+  let totalWeight = 0;
+
+  for (const obj of scene.objects) {
+    if (obj.type === "sphere") {
+      const mat = getMaterial(scene, obj.materialId);
+      const power = emissivePower(mat);
+      if (power <= 1e-5) {
+        continue;
+      }
+      const area = 4 * PI * obj.radius * obj.radius;
+      const weight = area * power;
+      lights.push({ type: "sphere", sphere: obj, materialId: obj.materialId, area, weight });
+      totalWeight += weight;
+      continue;
+    }
+    if (obj.type === "box") {
+      const mat = getMaterial(scene, obj.materialId);
+      const power = emissivePower(mat);
+      if (power <= 1e-5) {
+        continue;
+      }
+      const sx = obj.halfExtents[0] * 2;
+      const sy = obj.halfExtents[1] * 2;
+      const sz = obj.halfExtents[2] * 2;
+      const area = 2 * (sx * sy + sy * sz + sx * sz);
+      const weight = area * power;
+      lights.push({ type: "box", box: obj, materialId: obj.materialId, area, weight });
+      totalWeight += weight;
+      continue;
+    }
+    if (obj.type === "plane") {
+      const mat = getMaterial(scene, obj.materialId);
+      const power = emissivePower(mat);
+      if (power <= 1e-5) {
+        continue;
+      }
+      const area = 400;
+      const weight = area * power;
+      lights.push({ type: "plane", plane: obj, materialId: obj.materialId, area, weight });
+      totalWeight += weight;
+      continue;
+    }
+    if (obj.type === "triangles") {
+      const triCount = Math.floor(obj.indices.length / 3);
+      const areas: number[] = [];
+      const triIndices: number[] = [];
+      let totalArea = 0;
+      for (let t = 0; t < triCount; t++) {
+        const materialId = obj.materialIds?.[t] ?? obj.materialId ?? 0;
+        const mat = getMaterial(scene, materialId);
+        const power = emissivePower(mat);
+        if (power <= 1e-5) {
+          continue;
+        }
+        const i0 = obj.indices[t * 3 + 0] * 3;
+        const i1 = obj.indices[t * 3 + 1] * 3;
+        const i2 = obj.indices[t * 3 + 2] * 3;
+        const a: Vec3 = [obj.positions[i0 + 0], obj.positions[i0 + 1], obj.positions[i0 + 2]];
+        const b: Vec3 = [obj.positions[i1 + 0], obj.positions[i1 + 1], obj.positions[i1 + 2]];
+        const c: Vec3 = [obj.positions[i2 + 0], obj.positions[i2 + 1], obj.positions[i2 + 2]];
+        const n = cross(sub(b, a), sub(c, a));
+        const area = 0.5 * Math.hypot(n[0], n[1], n[2]);
+        if (area <= 1e-8) {
+          continue;
+        }
+        const weightedArea = area * power;
+        totalArea += weightedArea;
+        triIndices.push(t);
+        areas.push(totalArea);
+      }
+      if (triIndices.length) {
+        const cdf = new Float32Array(areas);
+        const triangleIndices = new Uint32Array(triIndices);
+        lights.push({ type: "triangles", mesh: obj, triangleIndices, cdf, totalArea, weight: totalArea });
+        totalWeight += totalArea;
+      }
+    }
+  }
+
+  return { lights, totalWeight };
+}
+
+function randomUnitVector(rng: Rng): Vec3 {
+  const z = rng.next() * 2 - 1;
+  const a = rng.next() * 2 * PI;
+  const r = Math.sqrt(Math.max(0, 1 - z * z));
+  return [r * Math.cos(a), z, r * Math.sin(a)];
+}
+
+function sampleEmissiveLight(
+  rng: Rng,
+  scene: SerializedScene,
+  lights: EmissiveLight[],
+  totalWeight: number
+): EmissiveLightSample | null {
+  if (!lights.length || totalWeight <= 1e-8) {
+    return null;
+  }
+  let pick = rng.next() * totalWeight;
+  let light = lights[lights.length - 1];
+  for (const candidate of lights) {
+    pick -= candidate.weight;
+    if (pick <= 0) {
+      light = candidate;
+      break;
+    }
+  }
+
+  if (light.type === "sphere") {
+    const normal = randomUnitVector(rng);
+    const position = add(light.sphere.center, mul(normal, light.sphere.radius));
+    const mat = getMaterial(scene, light.materialId);
+    return { position, normal, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+  }
+
+  if (light.type === "box") {
+    const hx = light.box.halfExtents[0];
+    const hy = light.box.halfExtents[1];
+    const hz = light.box.halfExtents[2];
+    const faceAreas = [4 * hy * hz, 4 * hy * hz, 4 * hx * hz, 4 * hx * hz, 4 * hx * hy, 4 * hx * hy];
+    let facePick = rng.next() * light.area;
+    let face = 0;
+    for (let i = 0; i < faceAreas.length; i++) {
+      facePick -= faceAreas[i];
+      if (facePick <= 0) {
+        face = i;
+        break;
+      }
+    }
+    const u = rng.next() * 2 - 1;
+    const v = rng.next() * 2 - 1;
+    const c = light.box.center;
+    let position: Vec3;
+    let normal: Vec3;
+    switch (face) {
+      case 0:
+        position = [c[0] + hx, c[1] + u * hy, c[2] + v * hz];
+        normal = [1, 0, 0];
+        break;
+      case 1:
+        position = [c[0] - hx, c[1] + u * hy, c[2] + v * hz];
+        normal = [-1, 0, 0];
+        break;
+      case 2:
+        position = [c[0] + u * hx, c[1] + hy, c[2] + v * hz];
+        normal = [0, 1, 0];
+        break;
+      case 3:
+        position = [c[0] + u * hx, c[1] - hy, c[2] + v * hz];
+        normal = [0, -1, 0];
+        break;
+      case 4:
+        position = [c[0] + u * hx, c[1] + v * hy, c[2] + hz];
+        normal = [0, 0, 1];
+        break;
+      default:
+        position = [c[0] + u * hx, c[1] + v * hy, c[2] - hz];
+        normal = [0, 0, -1];
+        break;
+    }
+    const mat = getMaterial(scene, light.materialId);
+    return { position, normal, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+  }
+
+  if (light.type === "plane") {
+    const n = normalize(light.plane.normal);
+    const basis = makeOrthoBasis(n);
+    const su = rng.next() * 20 - 10;
+    const sv = rng.next() * 20 - 10;
+    const anchor = mul(n, -light.plane.d);
+    const position = add(anchor, add(mul(basis.t, su), mul(basis.b, sv)));
+    const mat = getMaterial(scene, light.materialId);
+    return { position, normal: n, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+  }
+
+  const mesh = light.mesh;
+  const triPick = rng.next() * light.totalArea;
+  let triSlot = 0;
+  while (triSlot < light.cdf.length - 1 && triPick > light.cdf[triSlot]) {
+    triSlot += 1;
+  }
+  const triIndex = light.triangleIndices[triSlot];
+  const i0 = mesh.indices[triIndex * 3 + 0];
+  const i1 = mesh.indices[triIndex * 3 + 1];
+  const i2 = mesh.indices[triIndex * 3 + 2];
+  const p0: Vec3 = [mesh.positions[i0 * 3 + 0], mesh.positions[i0 * 3 + 1], mesh.positions[i0 * 3 + 2]];
+  const p1: Vec3 = [mesh.positions[i1 * 3 + 0], mesh.positions[i1 * 3 + 1], mesh.positions[i1 * 3 + 2]];
+  const p2: Vec3 = [mesh.positions[i2 * 3 + 0], mesh.positions[i2 * 3 + 1], mesh.positions[i2 * 3 + 2]];
+  const e1 = sub(p1, p0);
+  const e2 = sub(p2, p0);
+  const face = cross(e1, e2);
+  const normal = normalize(face);
+  const su = Math.sqrt(rng.next());
+  const b0 = 1 - su;
+  const b1 = su * (1 - rng.next());
+  const b2 = su * rng.next();
+  const position: Vec3 = [
+    p0[0] * b0 + p1[0] * b1 + p2[0] * b2,
+    p0[1] * b0 + p1[1] * b1 + p2[1] * b2,
+    p0[2] * b0 + p1[2] * b1 + p2[2] * b2
+  ];
+  const uv0: Vec2 = mesh.uvs
+    ? [
+        (mesh.uvs[i0 * 2 + 0] ?? 0) * b0 + (mesh.uvs[i1 * 2 + 0] ?? 0) * b1 + (mesh.uvs[i2 * 2 + 0] ?? 0) * b2,
+        (mesh.uvs[i0 * 2 + 1] ?? 0) * b0 + (mesh.uvs[i1 * 2 + 1] ?? 0) * b1 + (mesh.uvs[i2 * 2 + 1] ?? 0) * b2
+      ]
+    : [0, 0];
+  const uv1: Vec2 = mesh.uv2s
+    ? [
+        (mesh.uv2s[i0 * 2 + 0] ?? uv0[0]) * b0 + (mesh.uv2s[i1 * 2 + 0] ?? uv0[0]) * b1 + (mesh.uv2s[i2 * 2 + 0] ?? uv0[0]) * b2,
+        (mesh.uv2s[i0 * 2 + 1] ?? uv0[1]) * b0 + (mesh.uv2s[i1 * 2 + 1] ?? uv0[1]) * b1 + (mesh.uv2s[i2 * 2 + 1] ?? uv0[1]) * b2
+      ]
+    : uv0;
+  const materialId = mesh.materialIds?.[triIndex] ?? mesh.materialId ?? 0;
+  const emission = evaluateSurfaceMaterial(scene, getMaterial(scene, materialId), uv0, uv1).emissive;
+  return {
+    position,
+    normal,
+    emission,
+    pdf: Math.max(1e-8, luminance(emission) / totalWeight)
   };
 }
 
@@ -572,10 +844,15 @@ function suppressFireflies(
   return out;
 }
 
-function killExtremeIsolatedSpikes(color: Float32Array, width: number, height: number): Float32Array {
+function killExtremeIsolatedSpikes(color: Float32Array, width: number, height: number, strength: number): Float32Array {
+  if (strength <= 0) {
+    return color;
+  }
   const out = new Float32Array(color);
   const lumSamples = new Float32Array(9);
   const colorSamples = new Float32Array(27);
+  const spikeRatio = Math.max(2.5, EXTREME_SPIKE_RATIO / Math.max(0.25, strength));
+  const neighborLimit = EXTREME_SPIKE_NEIGHBOR_LIMIT / Math.max(0.5, strength);
 
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
@@ -600,7 +877,7 @@ function killExtremeIsolatedSpikes(color: Float32Array, width: number, height: n
           colorSamples[sampleCount * 3 + 0] = sr;
           colorSamples[sampleCount * 3 + 1] = sg;
           colorSamples[sampleCount * 3 + 2] = sb;
-          if (!(kx === 0 && ky === 0) && lum > centerLum / EXTREME_SPIKE_NEIGHBOR_LIMIT) {
+          if (!(kx === 0 && ky === 0) && lum > centerLum / neighborLimit) {
             brightNeighbors += 1;
           }
           sampleCount += 1;
@@ -613,7 +890,7 @@ function killExtremeIsolatedSpikes(color: Float32Array, width: number, height: n
 
       const sortedLum = Array.from(lumSamples).sort((a, b) => a - b);
       const medianLum = sortedLum[4];
-      if (centerLum <= Math.max(1e-6, medianLum * EXTREME_SPIKE_RATIO)) {
+      if (centerLum <= Math.max(1e-6, medianLum * spikeRatio)) {
         continue;
       }
 
@@ -821,6 +1098,8 @@ function tracePath(
   ray: Ray,
   scene: SerializedScene,
   triBvh: TriangleBvh | null,
+  emissiveLights: EmissiveLight[],
+  emissiveLightWeight: number,
   rng: Rng,
   maxBounces: number,
   lightIntensity: number,
@@ -853,8 +1132,45 @@ function tracePath(
     const nTex = applyNormalMap(scene, mat, hit.uv0, hit.uv1, hit.normal, hit.tangent, hit.bitangent, globalNormalStrength);
     const n = dot(nTex, ng) > 0 ? nTex : ng;
     const wo = mul(rd, -1);
-
     const shadowOrigin = add(hit.p, mul(ng, SHADOW_BIAS));
+
+    if (mat.emissive[0] > 0 || mat.emissive[1] > 0 || mat.emissive[2] > 0) {
+      radiance = add(
+        radiance,
+        clampSecondaryContribution(mulVec(throughput, mat.emissive), bounce, specularSpikeClamp, maxSampleLuminance)
+      );
+    }
+
+    for (let lightSampleIndex = 0; lightSampleIndex < EMISSIVE_DIRECT_SAMPLES; lightSampleIndex++) {
+      const emissiveSample = sampleEmissiveLight(rng, scene, emissiveLights, emissiveLightWeight);
+      if (emissiveSample) {
+        const toLight = sub(emissiveSample.position, hit.p);
+        const dist2 = dot(toLight, toLight);
+        if (dist2 > 1e-6) {
+          const dist = Math.sqrt(dist2);
+          const wiLight = mul(toLight, 1 / dist);
+          const noLDirect = Math.max(0, dot(n, wiLight));
+          const lightNoL = Math.max(0, dot(emissiveSample.normal, mul(wiLight, -1)));
+          if (noLDirect > 0 && lightNoL > 0 && !isOccluded(shadowOrigin, wiLight, scene, triBvh, dist - SHADOW_BIAS * 2)) {
+            const brdfE = evaluatePbrBrdf(mat, n, wo, wiLight);
+            const geom =
+              Math.min(
+                EMISSIVE_DIRECT_MAX_GEOM,
+                (noLDirect * lightNoL) / Math.max(1e-6, dist2 * emissiveSample.pdf * EMISSIVE_DIRECT_SAMPLES)
+              );
+            radiance = add(
+              radiance,
+              clampEmissiveDirectContribution(
+                mulScalar(throughput, mulVec(brdfE, emissiveSample.emission), geom),
+                specularSpikeClamp,
+                maxSampleLuminance
+              )
+            );
+          }
+        }
+      }
+    }
+
     const visible = !isOccluded(shadowOrigin, lightDir, scene, triBvh);
     const shadowAtten = visible ? 1 : 1 - shadowDarkness;
     if (shadowAtten > 0) {
@@ -938,6 +1254,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const maxSampleLuminance = Math.max(1, settings.fireflyClamp ?? DEFAULT_MAX_SAMPLE_LUMINANCE);
   const fireflySuppression = Math.max(1, Math.min(6, settings.fireflySuppression ?? FIREFLY_NEIGHBOR_BOOST));
   const specularSpikeClamp = Math.max(1, Math.min(12, settings.specularSpikeClamp ?? 4.5));
+  const extremeSpikeKill = Math.max(0, Math.min(2, settings.extremeSpikeKill ?? 1));
   const normalStrength = Math.max(0, Math.min(2, settings.normalStrength ?? 1));
   // UI semantics: higher slider value => stronger suppression.
   // Convert to neighbor boost: lower boost means stricter outlier clamp.
@@ -947,6 +1264,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const accum = new Float32Array(regionWidth * regionHeight * 3);
   const triMeshes = scene.objects.filter((o): o is TriangleMesh => o.type === "triangles");
   const triBvh = triMeshes.length ? new TriangleBvh(triMeshes) : null;
+  const { lights: emissiveLights, totalWeight: emissiveLightWeight } = buildEmissiveLights(scene);
 
   for (let sample = 0; sample < spp; sample++) {
     const emitTiles = settings.onTile && (sample === 0 || sample === spp - 1 || (sample + 1) % partialInterval === 0);
@@ -969,6 +1287,8 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
               ray,
               scene,
               triBvh,
+              emissiveLights,
+              emissiveLightWeight,
               rng,
               maxBounces,
               lightIntensity,
@@ -1013,7 +1333,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const deFireflied = suppressFireflies(linear, regionWidth, regionHeight, maxSampleLuminance, neighborBoost);
   const guides = buildGuides(regionWidth, regionHeight, offsetX, offsetY, width, height, camera, scene, triBvh);
   const denoised = denoiseAtrous(deFireflied, regionWidth, regionHeight, guides.depth, guides.normal, 2);
-  const deSpiked = killExtremeIsolatedSpikes(denoised, regionWidth, regionHeight);
+  const deSpiked = killExtremeIsolatedSpikes(denoised, regionWidth, regionHeight, extremeSpikeKill);
 
   for (let i = 0, p = 0; i < deSpiked.length; i += 3, p += 4) {
     rgba[p + 0] = toSrgb8(deSpiked[i + 0]);

@@ -79,7 +79,9 @@ function makeMaterial(sceneData: SerializedScene, materialId: number): PBRMetall
   const m = new PBRMetallicRoughnessMaterial(`mat-${materialId}-${Math.random().toString(36).slice(2)}`, previewScene);
   const mat = sceneData.materials[materialId];
   const c = mat?.baseColor ?? [0.8, 0.8, 0.8];
+  const e = mat?.emissive ?? [0, 0, 0];
   m.baseColor = new Color3(c[0], c[1], c[2]);
+  m.emissiveColor = new Color3(e[0], e[1], e[2]);
   m.metallic = Math.max(0, Math.min(1, mat?.metallic ?? 0));
   m.roughness = Math.max(0.04, Math.min(1, mat?.roughness ?? 0.7));
   return m;
@@ -173,6 +175,8 @@ document.body.appendChild(fileInput);
 
 const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 4);
 const maxWorkerCount = Math.max(1, Math.min(8, hardwareThreads * 2));
+const sampleBoxMaterialId = 3;
+const sampleBoxBaseEmissive: [number, number, number] = [1.2, 1.0, 0.35];
 
 const state: AppState = {
   jobId: 0,
@@ -186,6 +190,8 @@ const state: AppState = {
   fireflyClamp: 40,
   fireflySuppression: 3.0,
   specularSpikeClamp: 4.5,
+  extremeSpikeKill: 1.0,
+  sampleBoxEmissiveIntensity: 0.5,
   normalStrength: 1.0,
   workerCount: Math.min(maxWorkerCount, 8),
   blendMix: 0.5,
@@ -300,11 +306,40 @@ function copyRegionIntoFrame(
   }
 }
 
+function removeSampleMeshesFromScene(sceneData: SerializedScene): SerializedScene {
+  return {
+    ...sceneData,
+    objects: sceneData.objects.filter((obj) => obj.type === "triangles"),
+  };
+}
+
+function setSampleBoxEmissiveIntensity(sceneData: SerializedScene, intensity: number): SerializedScene {
+  const mat = sceneData.materials[sampleBoxMaterialId];
+  if (!mat) {
+    return sceneData;
+  }
+  const clamped = Math.max(0, Math.min(3, intensity));
+  const materials = sceneData.materials.slice();
+  materials[sampleBoxMaterialId] = {
+    ...mat,
+    emissive: [
+      sampleBoxBaseEmissive[0] * clamped,
+      sampleBoxBaseEmissive[1] * clamped,
+      sampleBoxBaseEmissive[2] * clamped,
+    ],
+  };
+  return {
+    ...sceneData,
+    materials,
+  };
+}
+
 async function importGlbFile(file: File): Promise<void> {
   state.glbMatMapping = controls.getGlbMatMapping();
   try {
     const meshes = await loadGlbPreview(file);
     state.scene = await importGlbIntoScene(meshes, state.scene, { mapMaterials: state.glbMatMapping });
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, state.sampleBoxEmissiveIntensity);
   } catch (err) {
     console.warn("GLB import failed:", err);
     throw err;
@@ -325,6 +360,8 @@ controls = createControls(ui, {
     state.fireflyClamp = controls.getFireflyClamp();
     state.fireflySuppression = controls.getFireflySuppression();
     state.specularSpikeClamp = controls.getSpecularSpikeClamp();
+    state.extremeSpikeKill = controls.getExtremeSpikeKill();
+    state.sampleBoxEmissiveIntensity = controls.getSampleBoxEmissiveIntensity();
     state.normalStrength = controls.getNormalStrength();
     state.workerCount = controls.getWorkerCount();
     state.spp = controls.getSpp();
@@ -373,6 +410,7 @@ controls = createControls(ui, {
         fireflyClamp: state.fireflyClamp,
         fireflySuppression: state.fireflySuppression,
         specularSpikeClamp: state.specularSpikeClamp,
+        extremeSpikeKill: state.extremeSpikeKill,
         normalStrength: state.normalStrength,
         tileSize: 32,
         partialInterval: 4,
@@ -394,7 +432,17 @@ controls = createControls(ui, {
     sendCancel("Cancelled");
     setRenderTime(null);
     state.scene = createDefaultScene();
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, state.sampleBoxEmissiveIntensity);
     clearImportedPreviewMeshes();
+    rebuildPreview(state.scene);
+    resultCanvas.style.display = "none";
+    setControlsFrozen(false);
+    setStatus("Idle");
+  },
+  onRemoveSampleMeshes: () => {
+    sendCancel("Cancelled");
+    setRenderTime(null);
+    state.scene = removeSampleMeshesFromScene(state.scene);
     rebuildPreview(state.scene);
     resultCanvas.style.display = "none";
     setControlsFrozen(false);
@@ -498,6 +546,14 @@ controls = createControls(ui, {
   },
   onSpecularSpikeClampChange: (value) => {
     state.specularSpikeClamp = value;
+  },
+  onExtremeSpikeKillChange: (value) => {
+    state.extremeSpikeKill = value;
+  },
+  onSampleBoxEmissiveIntensityChange: (value) => {
+    state.sampleBoxEmissiveIntensity = value;
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, value);
+    rebuildPreview(state.scene);
   },
   onNormalStrengthChange: (value) => {
     state.normalStrength = value;

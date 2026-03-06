@@ -4,6 +4,7 @@ type Callbacks = {
   onRender: () => void;
   onCancel: () => void;
   onResetScene: () => void;
+  onRemoveSampleMeshes: () => void;
   onImportGlbClick: () => void;
   onExportPng: () => void;
   onExportMix: () => void;
@@ -13,6 +14,8 @@ type Callbacks = {
   onFireflyClampChange: (value: number) => void;
   onFireflySuppressionChange: (value: number) => void;
   onSpecularSpikeClampChange: (value: number) => void;
+  onExtremeSpikeKillChange: (value: number) => void;
+  onSampleBoxEmissiveIntensityChange: (value: number) => void;
   onNormalStrengthChange: (value: number) => void;
   onBlendMixChange: (value: number) => void;
 };
@@ -27,6 +30,8 @@ export type Controls = {
   getFireflyClamp: () => number;
   getFireflySuppression: () => number;
   getSpecularSpikeClamp: () => number;
+  getExtremeSpikeKill: () => number;
+  getSampleBoxEmissiveIntensity: () => number;
   getNormalStrength: () => number;
   getSpp: () => number;
   getMaxBounces: () => number;
@@ -171,6 +176,34 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     callbacks.onSpecularSpikeClampChange(Math.max(1, Math.min(12, v)));
   });
 
+  const extremeSpikeKillLabel = makeLabel("Extreme spike kill");
+  const extremeSpikeKillInput = document.createElement("input");
+  extremeSpikeKillInput.type = "range";
+  extremeSpikeKillInput.min = "0";
+  extremeSpikeKillInput.max = "2";
+  extremeSpikeKillInput.step = "0.05";
+  extremeSpikeKillInput.value = "1.0";
+  extremeSpikeKillLabel.textContent = "Extreme spike kill: 1.00";
+  extremeSpikeKillInput.addEventListener("input", () => {
+    const v = Number.parseFloat(extremeSpikeKillInput.value);
+    extremeSpikeKillLabel.textContent = `Extreme spike kill: ${v.toFixed(2)}`;
+    callbacks.onExtremeSpikeKillChange(Math.max(0, Math.min(2, v)));
+  });
+
+  const boxEmissiveLabel = makeLabel("Box emissive");
+  const boxEmissiveInput = document.createElement("input");
+  boxEmissiveInput.type = "range";
+  boxEmissiveInput.min = "0";
+  boxEmissiveInput.max = "3";
+  boxEmissiveInput.step = "0.05";
+  boxEmissiveInput.value = "0.5";
+  boxEmissiveLabel.textContent = "Box emissive: 0.50";
+  boxEmissiveInput.addEventListener("input", () => {
+    const v = Number.parseFloat(boxEmissiveInput.value);
+    boxEmissiveLabel.textContent = `Box emissive: ${v.toFixed(2)}`;
+    callbacks.onSampleBoxEmissiveIntensityChange(Math.max(0, Math.min(3, v)));
+  });
+
   const normalStrengthLabel = makeLabel("Normal strength");
   const normalStrengthInput = document.createElement("input");
   normalStrengthInput.type = "range";
@@ -210,6 +243,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
   const resetButton = document.createElement("button");
   resetButton.textContent = "Reset Scene";
   resetButton.onclick = callbacks.onResetScene;
+
+  const removeSampleMeshesButton = document.createElement("button");
+  removeSampleMeshesButton.textContent = "Remove sample meshes";
+  removeSampleMeshesButton.onclick = callbacks.onRemoveSampleMeshes;
 
   const importButton = document.createElement("button");
   importButton.textContent = "Import GLB";
@@ -257,6 +294,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     suppressInput,
     specularClampLabel,
     specularClampInput,
+    extremeSpikeKillLabel,
+    extremeSpikeKillInput,
+    boxEmissiveLabel,
+    boxEmissiveInput,
     normalStrengthLabel,
     normalStrengthInput,
     blendLabel,
@@ -264,6 +305,7 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     renderButton,
     cancelButton,
     resetButton,
+    removeSampleMeshesButton,
     importButton,
     glbMapLabel,
     glbMapInput,
@@ -300,6 +342,14 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     getSpecularSpikeClamp: () => {
       const v = Number.parseFloat(specularClampInput.value);
       return Number.isFinite(v) ? Math.max(1, Math.min(12, v)) : 4.5;
+    },
+    getExtremeSpikeKill: () => {
+      const v = Number.parseFloat(extremeSpikeKillInput.value);
+      return Number.isFinite(v) ? Math.max(0, Math.min(2, v)) : 1;
+    },
+    getSampleBoxEmissiveIntensity: () => {
+      const v = Number.parseFloat(boxEmissiveInput.value);
+      return Number.isFinite(v) ? Math.max(0, Math.min(3, v)) : 0.5;
     },
     getNormalStrength: () => {
       const v = Number.parseFloat(normalStrengthInput.value);

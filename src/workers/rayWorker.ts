@@ -20,6 +20,7 @@ type RenderMsg = {
   fireflyClamp?: number;
   fireflySuppression?: number;
   specularSpikeClamp?: number;
+  extremeSpikeKill?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;

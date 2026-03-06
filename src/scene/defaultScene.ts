@@ -6,7 +6,7 @@ export function createDefaultScene(): SerializedScene {
       { baseColor: [0.9, 0.2, 0.2], metallic: 0.1, roughness: 0.35 },
       { baseColor: [0.2, 0.9, 0.2], metallic: 0.0, roughness: 0.6 },
       { baseColor: [0.2, 0.2, 0.9], metallic: 0.85, roughness: 0.2 },
-      { baseColor: [0.9, 0.9, 0.2], metallic: 0.85, roughness: 0.2 },
+      { baseColor: [0.9, 0.9, 0.2], emissive: [0.6, 0.5, 0.175], metallic: 0.85, roughness: 0.2 },
       { baseColor: [0.75, 0.75, 0.75], metallic: 0.0, roughness: 0.9 },
     ],
     objects: [
