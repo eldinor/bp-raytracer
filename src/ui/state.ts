@@ -21,12 +21,15 @@ export type AppState = {
   renderingJobId: number | null;
   status: UiStatus;
   resolution: ResolutionOption;
+  cameraAlpha: number;
   glbMatMapping: boolean;
   lightIntensity: number;
   shadowDarkness: number;
   fireflyClamp: number;
   fireflySuppression: number;
+  specularSpikeClamp: number;
   normalStrength: number;
+  workerCount: number;
   blendMix: number;
   spp: number;
   maxBounces: number;

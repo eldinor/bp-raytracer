@@ -9,12 +9,17 @@ type RenderMsg = {
   jobId: number;
   width: number;
   height: number;
+  offsetX?: number;
+  offsetY?: number;
+  regionWidth?: number;
+  regionHeight?: number;
   spp: number;
   maxBounces: number;
   lightIntensity?: number;
   shadowDarkness?: number;
   fireflyClamp?: number;
   fireflySuppression?: number;
+  specularSpikeClamp?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
@@ -86,6 +91,10 @@ ctx.onmessage = (ev: MessageEvent<MainToWorker>) => {
         jobId: msg.jobId,
         width: msg.width,
         height: msg.height,
+        offsetX: msg.offsetX ?? 0,
+        offsetY: msg.offsetY ?? 0,
+        regionWidth: msg.regionWidth ?? msg.width,
+        regionHeight: msg.regionHeight ?? msg.height,
         rgba: rgba.buffer
       },
       [rgba.buffer]

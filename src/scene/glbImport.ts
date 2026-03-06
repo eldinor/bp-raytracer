@@ -82,7 +82,7 @@ async function buildTextureEntry(
   const size = tex.getSize();
   const width = Math.max(1, size.width | 0);
   const height = Math.max(1, size.height | 0);
-  let raw: ArrayBufferView | null = null;
+  let raw: ArrayBufferView | null;
   try {
     raw = await maybeTexture.readPixels();
   } catch {

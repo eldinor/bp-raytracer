@@ -13,12 +13,17 @@ export type RenderSettings = {
   jobId: number;
   width: number;
   height: number;
+  offsetX?: number;
+  offsetY?: number;
+  regionWidth?: number;
+  regionHeight?: number;
   spp: number;
   maxBounces: number;
   lightIntensity?: number;
   shadowDarkness?: number;
   fireflyClamp?: number;
   fireflySuppression?: number;
+  specularSpikeClamp?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
@@ -48,9 +53,12 @@ const ambient = 0.01;
 const SHADOW_BIAS = 1e-2;
 const MAX_THROUGHPUT = 8.0;
 const DEFAULT_MAX_SAMPLE_LUMINANCE = 12.0;
+const MIN_RAYTRACE_ROUGHNESS = 0.06;
 const FIREFLY_NEIGHBOR_BOOST = 3.0;
 const FIREFLY_CENTER_WEIGHT = 0.15;
 const FIREFLY_TRIGGER_RATIO = 1.35;
+const EXTREME_SPIKE_RATIO = 4.5;
+const EXTREME_SPIKE_NEIGHBOR_LIMIT = 1.6;
 
 function mulVec(a: Vec3, b: Vec3): Vec3 {
   return [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
@@ -85,8 +93,13 @@ function clampLuminance(v: Vec3, maxLum: number): Vec3 {
   return [v[0] * s, v[1] * s, v[2] * s];
 }
 
-function reflect(i: Vec3, n: Vec3): Vec3 {
-  return sub(i, mul(n, 2 * dot(i, n)));
+function clampThroughput(v: Vec3, maxLum: number): Vec3 {
+  return clampLuminance(clampVecMax(v, MAX_THROUGHPUT), maxLum);
+}
+
+function clampSecondaryContribution(v: Vec3, bounce: number, specularSpikeClamp: number, maxSampleLuminance: number): Vec3 {
+  const limit = bounce >= 1 ? Math.min(maxSampleLuminance, specularSpikeClamp) : maxSampleLuminance;
+  return clampLuminance(v, limit);
 }
 
 function safeNormalize(v: Vec3): Vec3 {
@@ -99,7 +112,7 @@ function getMaterial(scene: SerializedScene, materialId: number): PbrMaterial {
   return {
     baseColor: m?.baseColor ?? [1, 1, 1],
     metallic: Math.max(0, Math.min(1, m?.metallic ?? 0)),
-    roughness: Math.max(0.04, Math.min(1, m?.roughness ?? 0.7)),
+    roughness: Math.max(MIN_RAYTRACE_ROUGHNESS, Math.min(1, m?.roughness ?? 0.7)),
     baseColorTexture: m?.baseColorTexture,
     metallicRoughnessTexture: m?.metallicRoughnessTexture,
     normalTexture: m?.normalTexture,
@@ -333,7 +346,7 @@ function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: 
 
   if (mat.metallicRoughnessTexture) {
     const tex = sampleTextureRgba(scene, mat.metallicRoughnessTexture, uv0, uv1);
-    roughness = Math.max(0.04, clamp01(roughness * tex[1]));
+    roughness = Math.max(MIN_RAYTRACE_ROUGHNESS, clamp01(roughness * tex[1]));
     metallic = clamp01(metallic * tex[2]);
   }
 
@@ -387,6 +400,10 @@ function applyNormalMap(
 function buildGuides(
   width: number,
   height: number,
+  offsetX: number,
+  offsetY: number,
+  fullWidth: number,
+  fullHeight: number,
   camera: RenderCamera,
   scene: SerializedScene,
   triBvh: TriangleBvh | null
@@ -395,7 +412,7 @@ function buildGuides(
   const normal = new Float32Array(width * height * 3);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const ray = makeRay(x, y, width, height, camera);
+      const ray = makeRay(x + offsetX, y + offsetY, fullWidth, fullHeight, camera);
       const hit = intersectScene(ray, scene, triBvh);
       const i = y * width + x;
       const i3 = i * 3;
@@ -552,6 +569,71 @@ function suppressFireflies(
       }
     }
   }
+  return out;
+}
+
+function killExtremeIsolatedSpikes(color: Float32Array, width: number, height: number): Float32Array {
+  const out = new Float32Array(color);
+  const lumSamples = new Float32Array(9);
+  const colorSamples = new Float32Array(27);
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      const i3 = i * 3;
+      const center: Vec3 = [color[i3 + 0], color[i3 + 1], color[i3 + 2]];
+      const centerLum = luminance(center);
+      if (centerLum <= 0) {
+        continue;
+      }
+
+      let sampleCount = 0;
+      let brightNeighbors = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const j = ((y + ky) * width + (x + kx)) * 3;
+          const sr = color[j + 0];
+          const sg = color[j + 1];
+          const sb = color[j + 2];
+          const lum = luminance([sr, sg, sb]);
+          lumSamples[sampleCount] = lum;
+          colorSamples[sampleCount * 3 + 0] = sr;
+          colorSamples[sampleCount * 3 + 1] = sg;
+          colorSamples[sampleCount * 3 + 2] = sb;
+          if (!(kx === 0 && ky === 0) && lum > centerLum / EXTREME_SPIKE_NEIGHBOR_LIMIT) {
+            brightNeighbors += 1;
+          }
+          sampleCount += 1;
+        }
+      }
+
+      if (brightNeighbors > 1) {
+        continue;
+      }
+
+      const sortedLum = Array.from(lumSamples).sort((a, b) => a - b);
+      const medianLum = sortedLum[4];
+      if (centerLum <= Math.max(1e-6, medianLum * EXTREME_SPIKE_RATIO)) {
+        continue;
+      }
+
+      const targetLum = sortedLum[5];
+      let bestIndex = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let s = 0; s < sampleCount; s++) {
+        const dist = Math.abs(lumSamples[s] - targetLum);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIndex = s;
+        }
+      }
+
+      out[i3 + 0] = colorSamples[bestIndex * 3 + 0];
+      out[i3 + 1] = colorSamples[bestIndex * 3 + 1];
+      out[i3 + 2] = colorSamples[bestIndex * 3 + 2];
+    }
+  }
+
   return out;
 }
 
@@ -744,6 +826,7 @@ function tracePath(
   lightIntensity: number,
   shadowDarkness: number,
   maxSampleLuminance: number,
+  specularSpikeClamp: number,
   globalNormalStrength: number
 ): Vec3 {
   let ro = ray.o;
@@ -752,11 +835,15 @@ function tracePath(
   let radiance: Vec3 = [0, 0, 0];
   const li = Math.max(0, lightIntensity);
   const bounces = Math.max(1, maxBounces);
+  const maxThroughputLuminance = Math.max(2, Math.min(MAX_THROUGHPUT, Math.sqrt(maxSampleLuminance) * 1.2));
 
   for (let bounce = 0; bounce < bounces; bounce++) {
     const hit = intersectScene({ o: ro, d: rd }, scene, triBvh);
     if (!hit) {
-      radiance = add(radiance, clampLuminance(mulVec(throughput, skyColor), maxSampleLuminance));
+      radiance = add(
+        radiance,
+        clampSecondaryContribution(mulVec(throughput, skyColor), bounce, specularSpikeClamp, maxSampleLuminance)
+      );
       break;
     }
 
@@ -776,14 +863,24 @@ function tracePath(
         const brdfL = evaluatePbrBrdf(mat, n, wo, lightDir);
         radiance = add(
           radiance,
-          clampLuminance(mulVec(throughput, mul(brdfL, noL * li * shadowAtten)), maxSampleLuminance)
+          clampSecondaryContribution(
+            mulVec(throughput, mul(brdfL, noL * li * shadowAtten)),
+            bounce,
+            specularSpikeClamp,
+            maxSampleLuminance
+          )
         );
       }
     }
     if (!visible) {
       radiance = add(
         radiance,
-        clampLuminance(mulVec(throughput, mul(mat.baseColor, ambient * (1 - mat.metallic))), maxSampleLuminance)
+        clampSecondaryContribution(
+          mulVec(throughput, mul(mat.baseColor, ambient * (1 - mat.metallic))),
+          bounce,
+          specularSpikeClamp,
+          maxSampleLuminance
+        )
       );
     }
 
@@ -808,9 +905,12 @@ function tracePath(
 
     const brdf = evaluatePbrBrdf(mat, n, wo, wi);
     const pdfMix = specProb * pdfSpec(mat, n, wo, wi) + (1 - specProb) * pdfDiffuse(noL);
-    const weight = noL / Math.max(1e-4, pdfMix);
+    const weight = noL / Math.max(1e-3, pdfMix);
     throughput = mulVec(throughput, mul(brdf, weight));
-    throughput = clampVecMax(throughput, MAX_THROUGHPUT);
+    if (bounce >= 1) {
+      throughput = clampLuminance(throughput, specularSpikeClamp);
+    }
+    throughput = clampThroughput(throughput, maxThroughputLuminance);
 
     if (bounce >= 3) {
       const p = Math.max(0.1, Math.min(0.95, luminance(throughput)));
@@ -829,35 +929,42 @@ function tracePath(
 
 export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const { width, height, spp, scene, camera, shouldCancel, onProgress, maxBounces } = settings;
+  const offsetX = Math.max(0, settings.offsetX ?? 0);
+  const offsetY = Math.max(0, settings.offsetY ?? 0);
+  const regionWidth = Math.max(1, settings.regionWidth ?? width);
+  const regionHeight = Math.max(1, settings.regionHeight ?? height);
   const lightIntensity = settings.lightIntensity ?? 1;
   const shadowDarkness = Math.max(0, Math.min(1, settings.shadowDarkness ?? 1));
   const maxSampleLuminance = Math.max(1, settings.fireflyClamp ?? DEFAULT_MAX_SAMPLE_LUMINANCE);
   const fireflySuppression = Math.max(1, Math.min(6, settings.fireflySuppression ?? FIREFLY_NEIGHBOR_BOOST));
+  const specularSpikeClamp = Math.max(1, Math.min(12, settings.specularSpikeClamp ?? 4.5));
   const normalStrength = Math.max(0, Math.min(2, settings.normalStrength ?? 1));
   // UI semantics: higher slider value => stronger suppression.
   // Convert to neighbor boost: lower boost means stricter outlier clamp.
   const neighborBoost = 6.5 - fireflySuppression * 0.8;
   const tileSize = Math.max(8, settings.tileSize ?? 32);
   const partialInterval = Math.max(1, settings.partialInterval ?? 4);
-  const accum = new Float32Array(width * height * 3);
+  const accum = new Float32Array(regionWidth * regionHeight * 3);
   const triMeshes = scene.objects.filter((o): o is TriangleMesh => o.type === "triangles");
   const triBvh = triMeshes.length ? new TriangleBvh(triMeshes) : null;
 
   for (let sample = 0; sample < spp; sample++) {
     const emitTiles = settings.onTile && (sample === 0 || sample === spp - 1 || (sample + 1) % partialInterval === 0);
-    for (let ty = 0; ty < height; ty += tileSize) {
-      for (let tx = 0; tx < width; tx += tileSize) {
+    for (let ty = 0; ty < regionHeight; ty += tileSize) {
+      for (let tx = 0; tx < regionWidth; tx += tileSize) {
         if (shouldCancel()) {
           throw new Error("cancelled");
         }
-        const tw = Math.min(tileSize, width - tx);
-        const th = Math.min(tileSize, height - ty);
+        const tw = Math.min(tileSize, regionWidth - tx);
+        const th = Math.min(tileSize, regionHeight - ty);
         for (let y = ty; y < ty + th; y++) {
           for (let x = tx; x < tx + tw; x++) {
-            const seed = hash4(x, y, sample, settings.jobId);
+            const globalX = x + offsetX;
+            const globalY = y + offsetY;
+            const seed = hash4(globalX, globalY, sample, settings.jobId);
             const rng = new Rng(seed);
-            const { jx, jy } = stratifiedSobolJitter(x, y, sample, spp, settings.jobId);
-            const ray = makeRay(x + jx, y + jy, width, height, camera);
+            const { jx, jy } = stratifiedSobolJitter(globalX, globalY, sample, spp, settings.jobId);
+            const ray = makeRay(globalX + jx, globalY + jy, width, height, camera);
             const color = tracePath(
               ray,
               scene,
@@ -867,9 +974,10 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
               lightIntensity,
               shadowDarkness,
               maxSampleLuminance,
+              specularSpikeClamp,
               normalStrength
             );
-            const i3 = (y * width + x) * 3;
+            const i3 = (y * regionWidth + x) * 3;
             accum[i3 + 0] += color[0];
             accum[i3 + 1] += color[1];
             accum[i3 + 2] += color[2];
@@ -881,7 +989,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
           let p = 0;
           for (let y = ty; y < ty + th; y++) {
             for (let x = tx; x < tx + tw; x++) {
-              const i3 = (y * width + x) * 3;
+              const i3 = (y * regionWidth + x) * 3;
               tile[p + 0] = toSrgb8(accum[i3 + 0] * inv);
               tile[p + 1] = toSrgb8(accum[i3 + 1] * inv);
               tile[p + 2] = toSrgb8(accum[i3 + 2] * inv);
@@ -889,27 +997,28 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
               p += 4;
             }
           }
-          settings.onTile?.(tx, ty, tw, th, tile);
+          settings.onTile?.(tx + offsetX, ty + offsetY, tw, th, tile);
         }
       }
     }
     onProgress?.(sample + 1, spp);
   }
 
-  const rgba = new Uint8ClampedArray(width * height * 4);
+  const rgba = new Uint8ClampedArray(regionWidth * regionHeight * 4);
   const invSpp = 1 / Math.max(1, spp);
   const linear = new Float32Array(accum.length);
   for (let i = 0; i < accum.length; i++) {
     linear[i] = accum[i] * invSpp;
   }
-  const deFireflied = suppressFireflies(linear, width, height, maxSampleLuminance, neighborBoost);
-  const guides = buildGuides(width, height, camera, scene, triBvh);
-  const denoised = denoiseAtrous(deFireflied, width, height, guides.depth, guides.normal, 2);
+  const deFireflied = suppressFireflies(linear, regionWidth, regionHeight, maxSampleLuminance, neighborBoost);
+  const guides = buildGuides(regionWidth, regionHeight, offsetX, offsetY, width, height, camera, scene, triBvh);
+  const denoised = denoiseAtrous(deFireflied, regionWidth, regionHeight, guides.depth, guides.normal, 2);
+  const deSpiked = killExtremeIsolatedSpikes(denoised, regionWidth, regionHeight);
 
-  for (let i = 0, p = 0; i < denoised.length; i += 3, p += 4) {
-    rgba[p + 0] = toSrgb8(denoised[i + 0]);
-    rgba[p + 1] = toSrgb8(denoised[i + 1]);
-    rgba[p + 2] = toSrgb8(denoised[i + 2]);
+  for (let i = 0, p = 0; i < deSpiked.length; i += 3, p += 4) {
+    rgba[p + 0] = toSrgb8(deSpiked[i + 0]);
+    rgba[p + 1] = toSrgb8(deSpiked[i + 1]);
+    rgba[p + 2] = toSrgb8(deSpiked[i + 2]);
     rgba[p + 3] = 255;
   }
   return rgba;
