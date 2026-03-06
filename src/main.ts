@@ -32,12 +32,19 @@ style.textContent = `
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: "Segoe UI", sans-serif; background: #111; }
   #viewport { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; }
   #ui { position: fixed; top: 12px; left: 12px; color: #f4f4f4; z-index: 10; }
-  .panel { display: grid; gap: 4px; width: 220px; padding: 8px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
-  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 4px 6px; }
+  .panel { display: grid; gap: 3px; width: 220px; padding: 6px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
+  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 3px 6px; }
   .panel input[type="range"] { padding: 0; }
   .panel button { cursor: pointer; }
-  .row-label { font-size: 11px; color: #c4ccd9; line-height: 1.1; }
-  .status { margin-top: 2px; font-size: 12px; color: #9ed67c; display: flex; justify-content: space-between; gap: 8px; }
+  .row-label { font-size: 10px; color: #c4ccd9; line-height: 1; }
+  .button-row { display: grid; gap: 3px; }
+  .button-row.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .button-row.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .status { margin-top: 1px; font-size: 11px; color: #9ed67c; display: flex; justify-content: space-between; gap: 8px; }
+  .compare-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,0.82); z-index: 30; }
+  .compare-overlay.open { display: flex; }
+  .compare-dialog { position: relative; max-width: min(96vw, 1280px); max-height: 92vh; padding: 8px; border-radius: 10px; background: rgba(18,20,24,0.96); border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
+  .compare-dialog img { display: block; max-width: 100%; max-height: calc(92vh - 16px); object-fit: contain; }
 `;
 document.head.appendChild(style);
 
@@ -51,6 +58,16 @@ resultCanvas.style.zIndex = "2";
 resultCanvas.style.display = "none";
 resultCanvas.style.opacity = "1";
 document.body.appendChild(resultCanvas);
+
+const compareOverlay = document.createElement("div");
+compareOverlay.className = "compare-overlay";
+const compareDialog = document.createElement("div");
+compareDialog.className = "compare-dialog";
+const compareImage = document.createElement("img");
+compareImage.alt = "2Compare preview";
+compareDialog.appendChild(compareImage);
+compareOverlay.appendChild(compareDialog);
+document.body.appendChild(compareOverlay);
 
 const display = new GLDisplay(resultCanvas);
 
@@ -80,6 +97,7 @@ function makeMaterial(sceneData: SerializedScene, materialId: number): PBRMetall
   const mat = sceneData.materials[materialId];
   const c = mat?.baseColor ?? [0.8, 0.8, 0.8];
   const e = mat?.emissive ?? [0, 0, 0];
+  m.backFaceCulling = false;
   m.baseColor = new Color3(c[0], c[1], c[2]);
   m.emissiveColor = new Color3(e[0], e[1], e[2]);
   m.metallic = Math.max(0, Math.min(1, mat?.metallic ?? 0));
@@ -146,6 +164,12 @@ async function loadGlbPreview(file: File): Promise<AbstractMesh[]> {
   try {
     const result = await SceneLoader.ImportMeshAsync(undefined, "", url, previewScene, undefined, ".glb");
     const meshes = result.meshes.filter((m) => m.name !== "__root__");
+    for (const mesh of meshes) {
+      const material = mesh.material;
+      if (material) {
+        material.backFaceCulling = false;
+      }
+    }
     importedPreviewMeshes.push(...meshes);
     return meshes;
   } finally {
@@ -188,9 +212,12 @@ const state: AppState = {
   lightIntensity: 0.7,
   shadowDarkness: 0.8,
   fireflyClamp: 40,
+  fireflyMode: "strong",
   fireflySuppression: 3.0,
   specularSpikeClamp: 4.5,
   extremeSpikeKill: 1.0,
+  softCleanup: 0,
+  emissiveTriangleThreshold: 0.02,
   sampleBoxEmissiveIntensity: 0.5,
   normalStrength: 1.0,
   workerCount: Math.min(maxWorkerCount, 8),
@@ -313,6 +340,89 @@ function removeSampleMeshesFromScene(sceneData: SerializedScene): SerializedScen
   };
 }
 
+function renderMixedCanvas(width: number, height: number): HTMLCanvasElement | null {
+  const c = document.createElement("canvas");
+  c.width = width;
+  c.height = height;
+  const ctx = c.getContext("2d");
+  if (!ctx) {
+    return null;
+  }
+
+  previewScene.render();
+  ctx.globalAlpha = 1;
+  ctx.drawImage(previewCanvas, 0, 0, width, height);
+  if (state.lastRender && resultCanvas.style.display !== "none") {
+    const rtCanvas = document.createElement("canvas");
+    rtCanvas.width = state.lastRender.width;
+    rtCanvas.height = state.lastRender.height;
+    const rtCtx = rtCanvas.getContext("2d");
+    if (!rtCtx) {
+      return null;
+    }
+    rtCtx.putImageData(
+      new ImageData(
+        new Uint8ClampedArray(state.lastRender.rgba.buffer.slice(0)),
+        state.lastRender.width,
+        state.lastRender.height
+      ),
+      0,
+      0
+    );
+    ctx.globalAlpha = Math.max(0, Math.min(1, state.blendMix));
+    ctx.drawImage(rtCanvas, 0, 0, width, height);
+    ctx.globalAlpha = 1;
+  }
+
+  return c;
+}
+
+function buildCompareCanvas(): HTMLCanvasElement | null {
+  const totalWidth = 1280;
+  const paneWidth = totalWidth / 2;
+  const aspect = Math.max(1, previewCanvas.height) / Math.max(1, previewCanvas.width);
+  const paneHeight = Math.max(1, Math.round(paneWidth * aspect));
+
+  previewScene.render();
+  const compareCanvas = document.createElement("canvas");
+  compareCanvas.width = totalWidth;
+  compareCanvas.height = paneHeight;
+  const compareCtx = compareCanvas.getContext("2d");
+  if (!compareCtx) {
+    return null;
+  }
+
+  compareCtx.fillStyle = "#111";
+  compareCtx.fillRect(0, 0, totalWidth, paneHeight);
+  compareCtx.drawImage(previewCanvas, 0, 0, paneWidth, paneHeight);
+
+  const mixCanvas = renderMixedCanvas(paneWidth, paneHeight);
+  if (!mixCanvas) {
+    return null;
+  }
+  compareCtx.drawImage(mixCanvas, paneWidth, 0, paneWidth, paneHeight);
+  return compareCanvas;
+}
+
+function downloadCanvas(canvas: HTMLCanvasElement, filename: string): void {
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+}
+
+function closeComparePopup(): void {
+  compareOverlay.classList.remove("open");
+  compareImage.removeAttribute("src");
+}
+
 function setSampleBoxEmissiveIntensity(sceneData: SerializedScene, intensity: number): SerializedScene {
   const mat = sceneData.materials[sampleBoxMaterialId];
   if (!mat) {
@@ -358,9 +468,12 @@ controls = createControls(ui, {
     state.lightIntensity = controls.getLightIntensity();
     state.shadowDarkness = controls.getShadowDarkness();
     state.fireflyClamp = controls.getFireflyClamp();
+    state.fireflyMode = controls.getFireflyMode();
     state.fireflySuppression = controls.getFireflySuppression();
     state.specularSpikeClamp = controls.getSpecularSpikeClamp();
     state.extremeSpikeKill = controls.getExtremeSpikeKill();
+    state.softCleanup = controls.getSoftCleanup();
+    state.emissiveTriangleThreshold = controls.getEmissiveTriangleThreshold();
     state.sampleBoxEmissiveIntensity = controls.getSampleBoxEmissiveIntensity();
     state.normalStrength = controls.getNormalStrength();
     state.workerCount = controls.getWorkerCount();
@@ -408,9 +521,12 @@ controls = createControls(ui, {
         lightIntensity: state.lightIntensity,
         shadowDarkness: state.shadowDarkness,
         fireflyClamp: state.fireflyClamp,
+        fireflyMode: state.fireflyMode,
         fireflySuppression: state.fireflySuppression,
         specularSpikeClamp: state.specularSpikeClamp,
         extremeSpikeKill: state.extremeSpikeKill,
+        softCleanup: state.softCleanup,
+        emissiveTriangleThreshold: state.emissiveTriangleThreshold,
         normalStrength: state.normalStrength,
         tileSize: 32,
         partialInterval: 4,
@@ -481,48 +597,26 @@ controls = createControls(ui, {
   onExportMix: () => {
     const w = Math.max(1, previewCanvas.width);
     const h = Math.max(1, previewCanvas.height);
-    const c = document.createElement("canvas");
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext("2d");
-    if (!ctx) {
+    const c = renderMixedCanvas(w, h);
+    if (!c) {
       return;
     }
-    previewScene.render();
-    ctx.globalAlpha = 1;
-    ctx.drawImage(previewCanvas, 0, 0, w, h);
-    if (state.lastRender && resultCanvas.style.display !== "none") {
-      const rtCanvas = document.createElement("canvas");
-      rtCanvas.width = state.lastRender.width;
-      rtCanvas.height = state.lastRender.height;
-      const rtCtx = rtCanvas.getContext("2d");
-      if (!rtCtx) {
-        return;
-      }
-      rtCtx.putImageData(
-        new ImageData(
-          new Uint8ClampedArray(state.lastRender.rgba.buffer.slice(0)),
-          state.lastRender.width,
-          state.lastRender.height
-        ),
-        0,
-        0
-      );
-      ctx.globalAlpha = Math.max(0, Math.min(1, state.blendMix));
-      ctx.drawImage(rtCanvas, 0, 0, w, h);
-      ctx.globalAlpha = 1;
+    downloadCanvas(c, "render-mix.png");
+  },
+  onExportCompare: () => {
+    const compareCanvas = buildCompareCanvas();
+    if (!compareCanvas) {
+      return;
     }
-    c.toBlob((blob) => {
-      if (!blob) {
-        return;
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "render-mix.png";
-      a.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+    downloadCanvas(compareCanvas, "2compare.png");
+  },
+  onOpenComparePopup: () => {
+    const compareCanvas = buildCompareCanvas();
+    if (!compareCanvas) {
+      return;
+    }
+    compareImage.src = compareCanvas.toDataURL("image/png");
+    compareOverlay.classList.add("open");
   },
   onCameraAlphaChange: (value) => {
     state.cameraAlpha = value;
@@ -549,6 +643,12 @@ controls = createControls(ui, {
   },
   onExtremeSpikeKillChange: (value) => {
     state.extremeSpikeKill = value;
+  },
+  onSoftCleanupChange: (value) => {
+    state.softCleanup = value;
+  },
+  onEmissiveTriangleThresholdChange: (value) => {
+    state.emissiveTriangleThreshold = value;
   },
   onSampleBoxEmissiveIntensityChange: (value) => {
     state.sampleBoxEmissiveIntensity = value;
@@ -680,6 +780,18 @@ workers.forEach((worker, workerIndex) => {
       }
     }
   };
+});
+
+compareOverlay.addEventListener("click", (e) => {
+  if (e.target === compareOverlay) {
+    closeComparePopup();
+  }
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && compareOverlay.classList.contains("open")) {
+    closeComparePopup();
+  }
 });
 
 setStatus("Idle");

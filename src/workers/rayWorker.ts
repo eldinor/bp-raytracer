@@ -2,6 +2,7 @@
 
 import { renderScene } from "../raytracer/raytracer";
 import type { SerializedScene, Vec3 } from "../scene/types";
+import type { FireflyMode } from "../ui/state";
 
 type InitMsg = { type: "init" };
 type RenderMsg = {
@@ -18,9 +19,12 @@ type RenderMsg = {
   lightIntensity?: number;
   shadowDarkness?: number;
   fireflyClamp?: number;
+  fireflyMode?: FireflyMode;
   fireflySuppression?: number;
   specularSpikeClamp?: number;
   extremeSpikeKill?: number;
+  softCleanup?: number;
+  emissiveTriangleThreshold?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;

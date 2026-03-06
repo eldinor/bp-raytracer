@@ -1,4 +1,5 @@
 import type { Box, MaterialTextureRef, Plane, SerializedScene, Sphere, TriangleMesh, Vec2, Vec3 } from "../scene/types";
+import type { FireflyMode } from "../ui/state";
 import { TriangleBvh, type Hit, type Ray } from "./bvh";
 import { EPS, Rng, add, clamp01, cross, dot, hash4, mul, normalize, sub } from "./math";
 
@@ -22,9 +23,12 @@ export type RenderSettings = {
   lightIntensity?: number;
   shadowDarkness?: number;
   fireflyClamp?: number;
+  fireflyMode?: FireflyMode;
   fireflySuppression?: number;
   specularSpikeClamp?: number;
   extremeSpikeKill?: number;
+  softCleanup?: number;
+  emissiveTriangleThreshold?: number;
   normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
@@ -63,10 +67,20 @@ type EmissiveLight =
     };
 
 type EmissiveLightSample = {
+  kind: "analytic" | "triangle";
   position: Vec3;
   normal: Vec3;
   emission: Vec3;
   pdf: number;
+};
+
+type FireflyTuning = {
+  indirectBounceFactor: number;
+  emissiveDirectFactor: number;
+  emissiveTriangleFactor: number;
+  emissiveGeomMax: number;
+  emissiveTriangleGeomMax: number;
+  neighborBoostBias: number;
 };
 
 const PI = Math.PI;
@@ -78,7 +92,7 @@ const MAX_THROUGHPUT = 8.0;
 const DEFAULT_MAX_SAMPLE_LUMINANCE = 12.0;
 const MIN_RAYTRACE_ROUGHNESS = 0.06;
 const EMISSIVE_DIRECT_SAMPLES = 3;
-const EMISSIVE_DIRECT_MAX_GEOM = 2.5;
+const MIN_EMISSIVE_TRIANGLE_SAMPLE_AREA = 0.02;
 const FIREFLY_NEIGHBOR_BOOST = 3.0;
 const FIREFLY_CENTER_WEIGHT = 0.15;
 const FIREFLY_TRIGGER_RATIO = 1.35;
@@ -122,13 +136,60 @@ function clampThroughput(v: Vec3, maxLum: number): Vec3 {
   return clampLuminance(clampVecMax(v, MAX_THROUGHPUT), maxLum);
 }
 
-function clampSecondaryContribution(v: Vec3, bounce: number, specularSpikeClamp: number, maxSampleLuminance: number): Vec3 {
-  const limit = bounce >= 1 ? Math.min(maxSampleLuminance, specularSpikeClamp) : maxSampleLuminance;
-  return clampLuminance(v, limit);
+function getFireflyTuning(mode: FireflyMode | undefined): FireflyTuning {
+  switch (mode) {
+    case "brutal":
+      return {
+        indirectBounceFactor: 0.45,
+        emissiveDirectFactor: 0.45,
+        emissiveTriangleFactor: 0.3,
+        emissiveGeomMax: 1.5,
+        emissiveTriangleGeomMax: 0.85,
+        neighborBoostBias: -0.9,
+      };
+    case "strong":
+      return {
+        indirectBounceFactor: 0.65,
+        emissiveDirectFactor: 0.6,
+        emissiveTriangleFactor: 0.42,
+        emissiveGeomMax: 2.0,
+        emissiveTriangleGeomMax: 1.1,
+        neighborBoostBias: -0.45,
+      };
+    default:
+      return {
+        indirectBounceFactor: 1.0,
+        emissiveDirectFactor: 0.8,
+        emissiveTriangleFactor: 0.6,
+        emissiveGeomMax: 2.5,
+        emissiveTriangleGeomMax: 1.5,
+        neighborBoostBias: 0,
+      };
+  }
 }
 
-function clampEmissiveDirectContribution(v: Vec3, specularSpikeClamp: number, maxSampleLuminance: number): Vec3 {
-  return clampLuminance(v, Math.min(maxSampleLuminance, specularSpikeClamp * 0.7));
+function clampSecondaryContributionTuned(
+  v: Vec3,
+  bounce: number,
+  specularSpikeClamp: number,
+  maxSampleLuminance: number,
+  tuning: FireflyTuning
+): Vec3 {
+  if (bounce < 1) {
+    return clampLuminance(v, maxSampleLuminance);
+  }
+  return clampLuminance(v, Math.min(maxSampleLuminance, specularSpikeClamp * tuning.indirectBounceFactor));
+}
+
+function clampEmissiveDirectContribution(
+  v: Vec3,
+  isTriangle: boolean,
+  specularSpikeClamp: number,
+  maxSampleLuminance: number,
+  tuning: FireflyTuning
+): Vec3 {
+  const factor = isTriangle ? tuning.emissiveTriangleFactor : tuning.emissiveDirectFactor;
+  return clampLuminance(v, Math.min(maxSampleLuminance, specularSpikeClamp * factor));
 }
 
 function mulScalar(a: Vec3, b: Vec3, s: number): Vec3 {
@@ -406,7 +467,7 @@ function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: 
   };
 }
 
-function buildEmissiveLights(scene: SerializedScene): { lights: EmissiveLight[]; totalWeight: number } {
+function buildEmissiveLights(scene: SerializedScene, emissiveTriangleThreshold: number): { lights: EmissiveLight[]; totalWeight: number } {
   const lights: EmissiveLight[] = [];
   let totalWeight = 0;
 
@@ -470,7 +531,7 @@ function buildEmissiveLights(scene: SerializedScene): { lights: EmissiveLight[];
         const c: Vec3 = [obj.positions[i2 + 0], obj.positions[i2 + 1], obj.positions[i2 + 2]];
         const n = cross(sub(b, a), sub(c, a));
         const area = 0.5 * Math.hypot(n[0], n[1], n[2]);
-        if (area <= 1e-8) {
+        if (area <= Math.max(1e-8, emissiveTriangleThreshold)) {
           continue;
         }
         const weightedArea = area * power;
@@ -520,7 +581,13 @@ function sampleEmissiveLight(
     const normal = randomUnitVector(rng);
     const position = add(light.sphere.center, mul(normal, light.sphere.radius));
     const mat = getMaterial(scene, light.materialId);
-    return { position, normal, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+    return {
+      kind: "analytic",
+      position,
+      normal,
+      emission: mat.emissive,
+      pdf: Math.max(1e-8, emissivePower(mat) / totalWeight)
+    };
   }
 
   if (light.type === "box") {
@@ -569,7 +636,13 @@ function sampleEmissiveLight(
         break;
     }
     const mat = getMaterial(scene, light.materialId);
-    return { position, normal, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+    return {
+      kind: "analytic",
+      position,
+      normal,
+      emission: mat.emissive,
+      pdf: Math.max(1e-8, emissivePower(mat) / totalWeight)
+    };
   }
 
   if (light.type === "plane") {
@@ -580,7 +653,13 @@ function sampleEmissiveLight(
     const anchor = mul(n, -light.plane.d);
     const position = add(anchor, add(mul(basis.t, su), mul(basis.b, sv)));
     const mat = getMaterial(scene, light.materialId);
-    return { position, normal: n, emission: mat.emissive, pdf: Math.max(1e-8, emissivePower(mat) / totalWeight) };
+    return {
+      kind: "analytic",
+      position,
+      normal: n,
+      emission: mat.emissive,
+      pdf: Math.max(1e-8, emissivePower(mat) / totalWeight)
+    };
   }
 
   const mesh = light.mesh;
@@ -624,6 +703,7 @@ function sampleEmissiveLight(
   const materialId = mesh.materialIds?.[triIndex] ?? mesh.materialId ?? 0;
   const emission = evaluateSurfaceMaterial(scene, getMaterial(scene, materialId), uv0, uv1).emissive;
   return {
+    kind: "triangle",
     position,
     normal,
     emission,
@@ -789,6 +869,79 @@ function denoiseAtrous(
   }
 
   return src;
+}
+
+function softCleanupBlur(
+  color: Float32Array,
+  width: number,
+  height: number,
+  depth: Float32Array,
+  normal: Float32Array,
+  strength: number
+): Float32Array {
+  if (strength <= 0) {
+    return color;
+  }
+
+  const out = new Float32Array(color.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const centerI = y * width + x;
+      const centerI3 = centerI * 3;
+      const cd = depth[centerI];
+      const cnx = normal[centerI3 + 0];
+      const cny = normal[centerI3 + 1];
+      const cnz = normal[centerI3 + 2];
+      const cc0 = color[centerI3 + 0];
+      const cc1 = color[centerI3 + 1];
+      const cc2 = color[centerI3 + 2];
+
+      let sumW = 1;
+      let sum0 = cc0;
+      let sum1 = cc1;
+      let sum2 = cc2;
+
+      for (let ky = -1; ky <= 1; ky++) {
+        const sy = y + ky;
+        if (sy < 0 || sy >= height) {
+          continue;
+        }
+        for (let kx = -1; kx <= 1; kx++) {
+          const sx = x + kx;
+          if (sx < 0 || sx >= width || (kx === 0 && ky === 0)) {
+            continue;
+          }
+          const i = sy * width + sx;
+          const i3 = i * 3;
+          const nd = depth[i];
+          const nnx = normal[i3 + 0];
+          const nny = normal[i3 + 1];
+          const nnz = normal[i3 + 2];
+          const dc0 = color[i3 + 0] - cc0;
+          const dc1 = color[i3 + 1] - cc1;
+          const dc2 = color[i3 + 2] - cc2;
+          const colorDist = Math.sqrt(dc0 * dc0 + dc1 * dc1 + dc2 * dc2);
+          const ndot = Math.max(0, cnx * nnx + cny * nny + cnz * nnz);
+          const normalW = Math.pow(ndot, 24);
+          const depthScale = Number.isFinite(cd) ? 0.02 * cd + 1e-3 : 1e9;
+          const depthW =
+            Number.isFinite(cd) && Number.isFinite(nd) ? Math.exp(-Math.abs(nd - cd) / depthScale) : 1;
+          const colorW = Math.exp(-colorDist * (10 - strength * 5));
+          const w = normalW * depthW * colorW * strength;
+          sumW += w;
+          sum0 += color[i3 + 0] * w;
+          sum1 += color[i3 + 1] * w;
+          sum2 += color[i3 + 2] * w;
+        }
+      }
+
+      const invW = 1 / Math.max(1e-8, sumW);
+      out[centerI3 + 0] = sum0 * invW;
+      out[centerI3 + 1] = sum1 * invW;
+      out[centerI3 + 2] = sum2 * invW;
+    }
+  }
+  return out;
 }
 
 function suppressFireflies(
@@ -1105,6 +1258,7 @@ function tracePath(
   lightIntensity: number,
   shadowDarkness: number,
   maxSampleLuminance: number,
+  fireflyTuning: FireflyTuning,
   specularSpikeClamp: number,
   globalNormalStrength: number
 ): Vec3 {
@@ -1119,10 +1273,16 @@ function tracePath(
   for (let bounce = 0; bounce < bounces; bounce++) {
     const hit = intersectScene({ o: ro, d: rd }, scene, triBvh);
     if (!hit) {
-      radiance = add(
-        radiance,
-        clampSecondaryContribution(mulVec(throughput, skyColor), bounce, specularSpikeClamp, maxSampleLuminance)
-      );
+        radiance = add(
+          radiance,
+          clampSecondaryContributionTuned(
+            mulVec(throughput, skyColor),
+            bounce,
+            specularSpikeClamp,
+            maxSampleLuminance,
+            fireflyTuning
+          )
+        );
       break;
     }
 
@@ -1135,10 +1295,16 @@ function tracePath(
     const shadowOrigin = add(hit.p, mul(ng, SHADOW_BIAS));
 
     if (mat.emissive[0] > 0 || mat.emissive[1] > 0 || mat.emissive[2] > 0) {
-      radiance = add(
-        radiance,
-        clampSecondaryContribution(mulVec(throughput, mat.emissive), bounce, specularSpikeClamp, maxSampleLuminance)
-      );
+        radiance = add(
+          radiance,
+          clampSecondaryContributionTuned(
+            mulVec(throughput, mat.emissive),
+            bounce,
+            specularSpikeClamp,
+            maxSampleLuminance,
+            fireflyTuning
+          )
+        );
     }
 
     for (let lightSampleIndex = 0; lightSampleIndex < EMISSIVE_DIRECT_SAMPLES; lightSampleIndex++) {
@@ -1153,17 +1319,22 @@ function tracePath(
           const lightNoL = Math.max(0, dot(emissiveSample.normal, mul(wiLight, -1)));
           if (noLDirect > 0 && lightNoL > 0 && !isOccluded(shadowOrigin, wiLight, scene, triBvh, dist - SHADOW_BIAS * 2)) {
             const brdfE = evaluatePbrBrdf(mat, n, wo, wiLight);
+            const geomMax = emissiveSample.kind === "triangle"
+              ? fireflyTuning.emissiveTriangleGeomMax
+              : fireflyTuning.emissiveGeomMax;
             const geom =
               Math.min(
-                EMISSIVE_DIRECT_MAX_GEOM,
+                geomMax,
                 (noLDirect * lightNoL) / Math.max(1e-6, dist2 * emissiveSample.pdf * EMISSIVE_DIRECT_SAMPLES)
               );
             radiance = add(
               radiance,
               clampEmissiveDirectContribution(
                 mulScalar(throughput, mulVec(brdfE, emissiveSample.emission), geom),
+                emissiveSample.kind === "triangle",
                 specularSpikeClamp,
-                maxSampleLuminance
+                maxSampleLuminance,
+                fireflyTuning
               )
             );
           }
@@ -1177,27 +1348,29 @@ function tracePath(
       const noL = Math.max(0, dot(n, lightDir));
       if (noL > 0) {
         const brdfL = evaluatePbrBrdf(mat, n, wo, lightDir);
-        radiance = add(
-          radiance,
-          clampSecondaryContribution(
-            mulVec(throughput, mul(brdfL, noL * li * shadowAtten)),
-            bounce,
-            specularSpikeClamp,
-            maxSampleLuminance
-          )
-        );
+          radiance = add(
+            radiance,
+            clampSecondaryContributionTuned(
+              mulVec(throughput, mul(brdfL, noL * li * shadowAtten)),
+              bounce,
+              specularSpikeClamp,
+              maxSampleLuminance,
+              fireflyTuning
+            )
+          );
       }
     }
     if (!visible) {
-      radiance = add(
-        radiance,
-        clampSecondaryContribution(
-          mulVec(throughput, mul(mat.baseColor, ambient * (1 - mat.metallic))),
-          bounce,
-          specularSpikeClamp,
-          maxSampleLuminance
-        )
-      );
+        radiance = add(
+          radiance,
+          clampSecondaryContributionTuned(
+            mulVec(throughput, mul(mat.baseColor, ambient * (1 - mat.metallic))),
+            bounce,
+            specularSpikeClamp,
+            maxSampleLuminance,
+            fireflyTuning
+          )
+        );
     }
 
     const specProb = chooseSpecProb(mat);
@@ -1252,19 +1425,22 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const lightIntensity = settings.lightIntensity ?? 1;
   const shadowDarkness = Math.max(0, Math.min(1, settings.shadowDarkness ?? 1));
   const maxSampleLuminance = Math.max(1, settings.fireflyClamp ?? DEFAULT_MAX_SAMPLE_LUMINANCE);
+  const fireflyTuning = getFireflyTuning(settings.fireflyMode);
   const fireflySuppression = Math.max(1, Math.min(6, settings.fireflySuppression ?? FIREFLY_NEIGHBOR_BOOST));
   const specularSpikeClamp = Math.max(1, Math.min(12, settings.specularSpikeClamp ?? 4.5));
   const extremeSpikeKill = Math.max(0, Math.min(2, settings.extremeSpikeKill ?? 1));
+  const softCleanup = Math.max(0, Math.min(1, settings.softCleanup ?? 0));
+  const emissiveTriangleThreshold = Math.max(0, Math.min(0.2, settings.emissiveTriangleThreshold ?? MIN_EMISSIVE_TRIANGLE_SAMPLE_AREA));
   const normalStrength = Math.max(0, Math.min(2, settings.normalStrength ?? 1));
   // UI semantics: higher slider value => stronger suppression.
   // Convert to neighbor boost: lower boost means stricter outlier clamp.
-  const neighborBoost = 6.5 - fireflySuppression * 0.8;
+  const neighborBoost = Math.max(1.2, 6.5 - fireflySuppression * 0.8 + fireflyTuning.neighborBoostBias);
   const tileSize = Math.max(8, settings.tileSize ?? 32);
   const partialInterval = Math.max(1, settings.partialInterval ?? 4);
   const accum = new Float32Array(regionWidth * regionHeight * 3);
   const triMeshes = scene.objects.filter((o): o is TriangleMesh => o.type === "triangles");
   const triBvh = triMeshes.length ? new TriangleBvh(triMeshes) : null;
-  const { lights: emissiveLights, totalWeight: emissiveLightWeight } = buildEmissiveLights(scene);
+  const { lights: emissiveLights, totalWeight: emissiveLightWeight } = buildEmissiveLights(scene, emissiveTriangleThreshold);
 
   for (let sample = 0; sample < spp; sample++) {
     const emitTiles = settings.onTile && (sample === 0 || sample === spp - 1 || (sample + 1) % partialInterval === 0);
@@ -1294,6 +1470,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
               lightIntensity,
               shadowDarkness,
               maxSampleLuminance,
+              fireflyTuning,
               specularSpikeClamp,
               normalStrength
             );
@@ -1334,11 +1511,12 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const guides = buildGuides(regionWidth, regionHeight, offsetX, offsetY, width, height, camera, scene, triBvh);
   const denoised = denoiseAtrous(deFireflied, regionWidth, regionHeight, guides.depth, guides.normal, 2);
   const deSpiked = killExtremeIsolatedSpikes(denoised, regionWidth, regionHeight, extremeSpikeKill);
+  const cleaned = softCleanupBlur(deSpiked, regionWidth, regionHeight, guides.depth, guides.normal, softCleanup);
 
-  for (let i = 0, p = 0; i < deSpiked.length; i += 3, p += 4) {
-    rgba[p + 0] = toSrgb8(deSpiked[i + 0]);
-    rgba[p + 1] = toSrgb8(deSpiked[i + 1]);
-    rgba[p + 2] = toSrgb8(deSpiked[i + 2]);
+  for (let i = 0, p = 0; i < cleaned.length; i += 3, p += 4) {
+    rgba[p + 0] = toSrgb8(cleaned[i + 0]);
+    rgba[p + 1] = toSrgb8(cleaned[i + 1]);
+    rgba[p + 2] = toSrgb8(cleaned[i + 2]);
     rgba[p + 3] = 255;
   }
   return rgba;

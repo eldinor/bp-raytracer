@@ -1,4 +1,4 @@
-import type { ResolutionOption, UiStatus } from "./state";
+import type { FireflyMode, ResolutionOption, UiStatus } from "./state";
 
 type Callbacks = {
   onRender: () => void;
@@ -8,6 +8,8 @@ type Callbacks = {
   onImportGlbClick: () => void;
   onExportPng: () => void;
   onExportMix: () => void;
+  onExportCompare: () => void;
+  onOpenComparePopup: () => void;
   onCameraAlphaChange: (value: number) => void;
   onLightIntensityChange: (value: number) => void;
   onShadowDarknessChange: (value: number) => void;
@@ -15,6 +17,8 @@ type Callbacks = {
   onFireflySuppressionChange: (value: number) => void;
   onSpecularSpikeClampChange: (value: number) => void;
   onExtremeSpikeKillChange: (value: number) => void;
+  onSoftCleanupChange: (value: number) => void;
+  onEmissiveTriangleThresholdChange: (value: number) => void;
   onSampleBoxEmissiveIntensityChange: (value: number) => void;
   onNormalStrengthChange: (value: number) => void;
   onBlendMixChange: (value: number) => void;
@@ -28,9 +32,12 @@ export type Controls = {
   getLightIntensity: () => number;
   getShadowDarkness: () => number;
   getFireflyClamp: () => number;
+  getFireflyMode: () => FireflyMode;
   getFireflySuppression: () => number;
   getSpecularSpikeClamp: () => number;
   getExtremeSpikeKill: () => number;
+  getSoftCleanup: () => number;
+  getEmissiveTriangleThreshold: () => number;
   getSampleBoxEmissiveIntensity: () => number;
   getNormalStrength: () => number;
   getSpp: () => number;
@@ -45,6 +52,13 @@ function makeLabel(text: string): HTMLLabelElement {
   label.textContent = text;
   label.className = "row-label";
   return label;
+}
+
+function makeButtonRow(columns: 2 | 3, ...elements: HTMLElement[]): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = `button-row cols-${columns}`;
+  row.append(...elements);
+  return row;
 }
 
 export function createControls(root: HTMLElement, callbacks: Callbacks, options?: { maxWorkers?: number }): Controls {
@@ -148,6 +162,18 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     callbacks.onFireflyClampChange(Math.max(2, Math.min(40, v)));
   });
 
+  const fireflyModeLabel = makeLabel("Firefly mode");
+  const fireflyMode = document.createElement("select");
+  for (const value of ["mild", "strong", "brutal"] as const) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value[0].toUpperCase() + value.slice(1);
+    if (value === "strong") {
+      opt.selected = true;
+    }
+    fireflyMode.appendChild(opt);
+  }
+
   const suppressLabel = makeLabel("Firefly suppression");
   const suppressInput = document.createElement("input");
   suppressInput.type = "range";
@@ -188,6 +214,34 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     const v = Number.parseFloat(extremeSpikeKillInput.value);
     extremeSpikeKillLabel.textContent = `Extreme spike kill: ${v.toFixed(2)}`;
     callbacks.onExtremeSpikeKillChange(Math.max(0, Math.min(2, v)));
+  });
+
+  const softCleanupLabel = makeLabel("Soft cleanup");
+  const softCleanupInput = document.createElement("input");
+  softCleanupInput.type = "range";
+  softCleanupInput.min = "0";
+  softCleanupInput.max = "1";
+  softCleanupInput.step = "0.05";
+  softCleanupInput.value = "0";
+  softCleanupLabel.textContent = "Soft cleanup: 0.00";
+  softCleanupInput.addEventListener("input", () => {
+    const v = Number.parseFloat(softCleanupInput.value);
+    softCleanupLabel.textContent = `Soft cleanup: ${v.toFixed(2)}`;
+    callbacks.onSoftCleanupChange(Math.max(0, Math.min(1, v)));
+  });
+
+  const emissiveTriangleThresholdLabel = makeLabel("Mesh emissive min area");
+  const emissiveTriangleThresholdInput = document.createElement("input");
+  emissiveTriangleThresholdInput.type = "range";
+  emissiveTriangleThresholdInput.min = "0";
+  emissiveTriangleThresholdInput.max = "0.2";
+  emissiveTriangleThresholdInput.step = "0.005";
+  emissiveTriangleThresholdInput.value = "0.02";
+  emissiveTriangleThresholdLabel.textContent = "Mesh emissive min area: 0.020";
+  emissiveTriangleThresholdInput.addEventListener("input", () => {
+    const v = Number.parseFloat(emissiveTriangleThresholdInput.value);
+    emissiveTriangleThresholdLabel.textContent = `Mesh emissive min area: ${v.toFixed(3)}`;
+    callbacks.onEmissiveTriangleThresholdChange(Math.max(0, Math.min(0.2, v)));
   });
 
   const boxEmissiveLabel = makeLabel("Box emissive");
@@ -265,6 +319,14 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
   exportMixButton.textContent = "Export mix";
   exportMixButton.onclick = callbacks.onExportMix;
 
+  const exportCompareButton = document.createElement("button");
+  exportCompareButton.textContent = "2Compare";
+  exportCompareButton.onclick = callbacks.onExportCompare;
+
+  const openCompareButton = document.createElement("button");
+  openCompareButton.textContent = "Open";
+  openCompareButton.onclick = callbacks.onOpenComparePopup;
+
   const status = document.createElement("div");
   status.className = "status";
   const statusText = document.createElement("span");
@@ -272,6 +334,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
   const renderTime = document.createElement("span");
   renderTime.textContent = "-";
   status.append(statusText, renderTime);
+  const actionRowPrimary = makeButtonRow(2, renderButton, cancelButton);
+  const actionRowSecondary = makeButtonRow(2, resetButton, removeSampleMeshesButton);
+  const actionRowTertiary = makeButtonRow(2, importButton, exportButton);
+  const actionRowQuaternary = makeButtonRow(3, exportMixButton, exportCompareButton, openCompareButton);
 
   panel.append(
     resolutionLabel,
@@ -290,27 +356,30 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     shadowInput,
     fireflyLabel,
     fireflyInput,
+    fireflyModeLabel,
+    fireflyMode,
     suppressLabel,
     suppressInput,
     specularClampLabel,
     specularClampInput,
     extremeSpikeKillLabel,
     extremeSpikeKillInput,
+    softCleanupLabel,
+    softCleanupInput,
+    emissiveTriangleThresholdLabel,
+    emissiveTriangleThresholdInput,
     boxEmissiveLabel,
     boxEmissiveInput,
     normalStrengthLabel,
     normalStrengthInput,
     blendLabel,
     blendInput,
-    renderButton,
-    cancelButton,
-    resetButton,
-    removeSampleMeshesButton,
-    importButton,
+    actionRowPrimary,
+    actionRowSecondary,
+    actionRowTertiary,
+    actionRowQuaternary,
     glbMapLabel,
     glbMapInput,
-    exportButton,
-    exportMixButton,
     status
   );
   root.appendChild(panel);
@@ -335,6 +404,7 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
       const v = Number.parseFloat(fireflyInput.value);
       return Number.isFinite(v) ? Math.max(2, Math.min(40, v)) : 40;
     },
+    getFireflyMode: () => fireflyMode.value as FireflyMode,
     getFireflySuppression: () => {
       const v = Number.parseFloat(suppressInput.value);
       return Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 3;
@@ -346,6 +416,14 @@ export function createControls(root: HTMLElement, callbacks: Callbacks, options?
     getExtremeSpikeKill: () => {
       const v = Number.parseFloat(extremeSpikeKillInput.value);
       return Number.isFinite(v) ? Math.max(0, Math.min(2, v)) : 1;
+    },
+    getSoftCleanup: () => {
+      const v = Number.parseFloat(softCleanupInput.value);
+      return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+    },
+    getEmissiveTriangleThreshold: () => {
+      const v = Number.parseFloat(emissiveTriangleThresholdInput.value);
+      return Number.isFinite(v) ? Math.max(0, Math.min(0.2, v)) : 0.02;
     },
     getSampleBoxEmissiveIntensity: () => {
       const v = Number.parseFloat(boxEmissiveInput.value);
