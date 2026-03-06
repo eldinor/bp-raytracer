@@ -1,4 +1,5 @@
 import {
+  AbstractMesh,
   ArcRotateCamera,
   Color3,
   DirectionalLight,
@@ -8,9 +9,11 @@ import {
   MeshBuilder,
   PBRMetallicRoughnessMaterial,
   Scene,
+  SceneLoader,
   Vector3,
   VertexData,
 } from "@babylonjs/core";
+import "@babylonjs/loaders/glTF";
 import { GLDisplay } from "./gl/glDisplay";
 import { createDefaultScene } from "./scene/defaultScene";
 import { importGlbIntoScene } from "./scene/glbImport";
@@ -69,6 +72,7 @@ const dir = new DirectionalLight("dir", new Vector3(-1, -2, -1).normalize(), pre
 dir.intensity = 0.6;
 
 let previewMeshes: Mesh[] = [];
+let importedPreviewMeshes: AbstractMesh[] = [];
 
 function makeMaterial(sceneData: SerializedScene, materialId: number): PBRMetallicRoughnessMaterial {
   const m = new PBRMetallicRoughnessMaterial(`mat-${materialId}-${Math.random().toString(36).slice(2)}`, previewScene);
@@ -115,14 +119,34 @@ function rebuildPreview(sceneData: SerializedScene): void {
       return;
     }
 
-    const mesh = new Mesh(`tri-${idx}`, previewScene);
-    const vd = new VertexData();
-    vd.positions = Array.from(obj.positions);
-    vd.indices = Array.from(obj.indices);
-    vd.applyToMesh(mesh, true);
-    mesh.material = makeMaterial(sceneData, obj.materialId ?? 0);
-    previewMeshes.push(mesh);
+    if (!importedPreviewMeshes.length) {
+      const mesh = new Mesh(`tri-${idx}`, previewScene);
+      const vd = new VertexData();
+      vd.positions = Array.from(obj.positions);
+      vd.indices = Array.from(obj.indices);
+      vd.applyToMesh(mesh, true);
+      mesh.material = makeMaterial(sceneData, obj.materialId ?? 0);
+      previewMeshes.push(mesh);
+    }
   });
+}
+
+function clearImportedPreviewMeshes(): void {
+  for (const m of importedPreviewMeshes) {
+    m.dispose(false, true);
+  }
+  importedPreviewMeshes = [];
+}
+
+async function loadGlbPreview(file: File): Promise<void> {
+  const url = URL.createObjectURL(file);
+  try {
+    const result = await SceneLoader.ImportMeshAsync(undefined, "", url, previewScene, undefined, ".glb");
+    const meshes = result.meshes.filter((m) => m.name !== "__root__");
+    importedPreviewMeshes.push(...meshes);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function applyPreviewLightIntensity(intensity: number): void {
@@ -150,11 +174,12 @@ const state: AppState = {
   renderingJobId: null,
   status: "Idle",
   resolution: "fullscreen",
+  glbMatMapping: true,
   lightIntensity: 0.7,
-  shadowDarkness: 1,
-  fireflyClamp: 12,
-  blendMix: 1,
-  spp: 200,
+  shadowDarkness: 0.8,
+  fireflyClamp: 40,
+  blendMix: 0.5,
+  spp: 4,
   maxBounces: 4,
   scene: createDefaultScene(),
   camera: {
@@ -229,7 +254,13 @@ function applyBlendMix(mix: number): void {
 
 async function importGlbFile(file: File): Promise<void> {
   const bytes = await file.arrayBuffer();
-  state.scene = await importGlbIntoScene(bytes, state.scene);
+  state.glbMatMapping = controls.getGlbMatMapping();
+  state.scene = await importGlbIntoScene(bytes, state.scene, { mapMaterials: state.glbMatMapping });
+  try {
+    await loadGlbPreview(file);
+  } catch (err) {
+    console.warn("GLB preview import failed, keeping raytracer import:", err);
+  }
   rebuildPreview(state.scene);
   resultCanvas.style.display = "none";
   setControlsFrozen(false);
@@ -282,6 +313,7 @@ controls = createControls(ui, {
   onResetScene: () => {
     sendCancel("Cancelled");
     state.scene = createDefaultScene();
+    clearImportedPreviewMeshes();
     rebuildPreview(state.scene);
     resultCanvas.style.display = "none";
     setControlsFrozen(false);
