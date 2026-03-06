@@ -1,370 +1,313 @@
-import type { DiffuseMaterial, SerializedScene, TriangleMesh, Vec3 } from "./types";
-
-type GlbChunk = { type: number; data: Uint8Array };
-
-const GLB_MAGIC = 0x46546c67;
-const JSON_CHUNK = 0x4e4f534a;
-const BIN_CHUNK = 0x004e4942;
+import {
+  BaseTexture,
+  Material,
+  Matrix,
+  Mesh,
+  MultiMaterial,
+  PBRMaterial,
+  PBRMetallicRoughnessMaterial,
+  StandardMaterial,
+  Texture,
+  Vector3,
+  VertexBuffer,
+  type AbstractMesh
+} from "@babylonjs/core";
+import type { DiffuseMaterial, MaterialTextureRef, SceneTexture, SerializedScene, TriangleMesh, Vec3 } from "./types";
 
 type GlbImportOptions = {
   mapMaterials?: boolean;
 };
 
-type ImageAvg = { rgb: Vec3; rough: number; metal: number };
-
-function toVec3(arr: ArrayLike<number>, offset = 0): Vec3 {
-  return [arr[offset], arr[offset + 1], arr[offset + 2]];
-}
-
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
 }
 
-function readAccessor(gltf: any, accessorIndex: number, bin: Uint8Array): ArrayBufferView {
-  const accessor = gltf.accessors[accessorIndex];
-  const bufferView = gltf.bufferViews[accessor.bufferView];
-  const compType = accessor.componentType;
-  const count = accessor.count;
-  const type = accessor.type;
-  const elemsPerType =
-    type === "SCALAR"
-      ? 1
-      : type === "VEC2"
-        ? 2
-        : type === "VEC3"
-          ? 3
-          : type === "VEC4"
-            ? 4
-            : 1;
-  const byteOffset = (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
-  const byteLength = count * elemsPerType;
-  const start = bin.byteOffset + byteOffset;
-  const stride = bufferView.byteStride ?? 0;
-
-  if (stride && stride !== elemsPerType * (compType === 5126 ? 4 : 2)) {
-    throw new Error("Unsupported interleaved accessor layout");
+function vec3FromColor(color: { r: number; g: number; b: number } | null | undefined, fallback: Vec3): Vec3 {
+  if (!color) {
+    return fallback;
   }
-
-  if (compType === 5126) {
-    return new Float32Array(bin.buffer, start, byteLength);
-  }
-  if (compType === 5125) {
-    return new Uint32Array(bin.buffer, start, byteLength);
-  }
-  if (compType === 5123) {
-    return new Uint16Array(bin.buffer, start, byteLength);
-  }
-  throw new Error(`Unsupported accessor component type: ${compType}`);
+  return [clamp01(color.r), clamp01(color.g), clamp01(color.b)];
 }
 
-function parseChunks(buffer: ArrayBuffer): GlbChunk[] {
-  const dv = new DataView(buffer);
-  const magic = dv.getUint32(0, true);
-  if (magic !== GLB_MAGIC) {
-    throw new Error("File is not a valid GLB");
-  }
-  const version = dv.getUint32(4, true);
-  if (version !== 2) {
-    throw new Error(`Unsupported GLB version: ${version}`);
-  }
-  const length = dv.getUint32(8, true);
-  if (length !== buffer.byteLength) {
-    throw new Error("GLB length mismatch");
-  }
-  const chunks: GlbChunk[] = [];
-  let offset = 12;
-  while (offset < length) {
-    const chunkLength = dv.getUint32(offset, true);
-    const chunkType = dv.getUint32(offset + 4, true);
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + chunkLength;
-    chunks.push({ type: chunkType, data: new Uint8Array(buffer, dataStart, chunkLength) });
-    offset = dataEnd;
-  }
-  return chunks;
+function toUvTransform(m: Matrix): [number, number, number, number, number, number] {
+  const mm = m.m;
+  return [mm[0], mm[4], mm[12], mm[1], mm[5], mm[13]];
 }
 
-function multiplyMat4(a: number[], b: number[]): number[] {
-  const out = new Array<number>(16).fill(0);
-  for (let col = 0; col < 4; col++) {
-    for (let row = 0; row < 4; row++) {
-      out[col * 4 + row] =
-        a[0 * 4 + row] * b[col * 4 + 0] +
-        a[1 * 4 + row] * b[col * 4 + 1] +
-        a[2 * 4 + row] * b[col * 4 + 2] +
-        a[3 * 4 + row] * b[col * 4 + 3];
+function toUint8Rgba(src: ArrayBufferView, pixelCount: number): Uint8Array {
+  const needed = pixelCount * 4;
+  if (src instanceof Uint8Array) {
+    if (src.length >= needed) {
+      return new Uint8Array(src.buffer.slice(src.byteOffset, src.byteOffset + needed));
     }
+    const out = new Uint8Array(needed);
+    out.set(src.subarray(0, Math.min(src.length, needed)));
+    return out;
   }
+  if (src instanceof Uint8ClampedArray) {
+    return new Uint8Array(src.buffer.slice(src.byteOffset, src.byteOffset + Math.min(src.byteLength, needed)));
+  }
+  if (src instanceof Float32Array) {
+    const out = new Uint8Array(needed);
+    for (let i = 0; i < needed; i++) {
+      out[i] = Math.max(0, Math.min(255, Math.round(src[i] * 255)));
+    }
+    return out;
+  }
+  const bytes = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+  if (bytes.length >= needed) {
+    return new Uint8Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + needed));
+  }
+  const out = new Uint8Array(needed);
+  out.set(bytes.subarray(0, bytes.length));
   return out;
 }
 
-function composeNodeWorldMatrix(node: any, parent?: number[]): number[] {
-  if (Array.isArray(node.matrix) && node.matrix.length === 16) {
-    const local = node.matrix.map((v: unknown) => Number(v));
-    return parent ? multiplyMat4(parent, local) : local;
+async function buildTextureEntry(
+  tex: BaseTexture,
+  sceneTextures: SceneTexture[],
+  textureMap: Map<number, number>
+): Promise<number | null> {
+  const key = tex.uniqueId;
+  const cached = textureMap.get(key);
+  if (cached != null) {
+    return cached;
   }
 
-  const t = node.translation ?? [0, 0, 0];
-  const s = node.scale ?? [1, 1, 1];
-  const r = node.rotation ?? [0, 0, 0, 1];
-  const [x, y, z, w] = r;
-  const xx = x * x;
-  const yy = y * y;
-  const zz = z * z;
-  const xy = x * y;
-  const xz = x * z;
-  const yz = y * z;
-  const wx = w * x;
-  const wy = w * y;
-  const wz = w * z;
-
-  const m = [
-    (1 - 2 * (yy + zz)) * s[0],
-    (2 * (xy + wz)) * s[0],
-    (2 * (xz - wy)) * s[0],
-    0,
-    (2 * (xy - wz)) * s[1],
-    (1 - 2 * (xx + zz)) * s[1],
-    (2 * (yz + wx)) * s[1],
-    0,
-    (2 * (xz + wy)) * s[2],
-    (2 * (yz - wx)) * s[2],
-    (1 - 2 * (xx + yy)) * s[2],
-    0,
-    t[0],
-    t[1],
-    t[2],
-    1
-  ];
-  return parent ? multiplyMat4(parent, m) : m;
-}
-
-function transformPoint(m: number[], p: Vec3): Vec3 {
-  return [
-    p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12],
-    p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13],
-    p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14]
-  ];
-}
-
-function gatherNodes(gltf: any, sceneIndex: number): number[] {
-  const scene = gltf.scenes?.[sceneIndex] ?? gltf.scenes?.[0];
-  if (!scene?.nodes?.length) {
-    return [];
-  }
-  return scene.nodes;
-}
-
-async function imageToAvg(blob: Blob): Promise<ImageAvg> {
-  const bmp = await createImageBitmap(blob);
-  const w = Math.max(1, Math.min(64, bmp.width));
-  const h = Math.max(1, Math.min(64, bmp.height));
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  const ctx = c.getContext("2d");
-  if (!ctx) {
-    bmp.close();
-    return { rgb: [1, 1, 1], rough: 1, metal: 0 };
-  }
-  ctx.drawImage(bmp, 0, 0, w, h);
-  bmp.close();
-  const data = ctx.getImageData(0, 0, w, h).data;
-  let sr = 0;
-  let sg = 0;
-  let sb = 0;
-  let sgRough = 0;
-  let sbMetal = 0;
-  const px = w * h;
-  for (let i = 0; i < data.length; i += 4) {
-    sr += data[i + 0];
-    sg += data[i + 1];
-    sb += data[i + 2];
-    sgRough += data[i + 1];
-    sbMetal += data[i + 2];
-  }
-  return {
-    rgb: [sr / (255 * px), sg / (255 * px), sb / (255 * px)],
-    rough: sgRough / (255 * px),
-    metal: sbMetal / (255 * px)
-  };
-}
-
-async function buildImageAverages(gltf: any, bin: Uint8Array): Promise<Map<number, ImageAvg>> {
-  const map = new Map<number, ImageAvg>();
-  const images = gltf.images ?? [];
-  for (let i = 0; i < images.length; i++) {
-    const img = images[i];
-    try {
-      let blob: Blob | null = null;
-      if (typeof img.bufferView === "number") {
-        const bv = gltf.bufferViews[img.bufferView];
-        const off = bv.byteOffset ?? 0;
-        const len = bv.byteLength ?? 0;
-        blob = new Blob([bin.slice(off, off + len)], { type: img.mimeType ?? "image/png" });
-      } else if (typeof img.uri === "string" && img.uri.startsWith("data:")) {
-        const res = await fetch(img.uri);
-        blob = await res.blob();
-      }
-      if (blob) {
-        map.set(i, await imageToAvg(blob));
-      }
-    } catch {
-      map.set(i, { rgb: [1, 1, 1], rough: 1, metal: 0 });
-    }
-  }
-  return map;
-}
-
-function texAvgForTexture(gltf: any, textureIndex: number | undefined, imageAvg: Map<number, ImageAvg>): ImageAvg | null {
-  if (textureIndex == null || textureIndex < 0) {
+  const maybeTexture = tex as Texture & { readPixels?: () => Promise<ArrayBufferView | null> };
+  if (typeof maybeTexture.readPixels !== "function") {
     return null;
   }
-  const tex = gltf.textures?.[textureIndex];
-  if (!tex || typeof tex.source !== "number") {
+
+  const size = tex.getSize();
+  const width = Math.max(1, size.width | 0);
+  const height = Math.max(1, size.height | 0);
+  let raw: ArrayBufferView | null = null;
+  try {
+    raw = await maybeTexture.readPixels();
+  } catch {
     return null;
   }
-  return imageAvg.get(tex.source) ?? null;
+  if (!raw) {
+    return null;
+  }
+
+  const rgba = toUint8Rgba(raw, width * height);
+  const id = sceneTextures.length;
+  sceneTextures.push({ width, height, rgba });
+  textureMap.set(key, id);
+  return id;
 }
 
-function parseGltfMaterial(gltf: any, materialIndex: number, imageAvg: Map<number, ImageAvg>): DiffuseMaterial {
-  const m = gltf.materials?.[materialIndex] ?? {};
-  const pbr = m.pbrMetallicRoughness ?? {};
-  const f = pbr.baseColorFactor ?? [1, 1, 1, 1];
-  const baseTex = texAvgForTexture(gltf, pbr.baseColorTexture?.index, imageAvg);
-  const mrTex = texAvgForTexture(gltf, pbr.metallicRoughnessTexture?.index, imageAvg);
-  const baseTexRgb = baseTex?.rgb ?? [1, 1, 1];
+async function buildTextureRef(
+  tex: BaseTexture | null | undefined,
+  srgb: boolean,
+  sceneTextures: SceneTexture[],
+  textureMap: Map<number, number>
+): Promise<MaterialTextureRef | undefined> {
+  if (!tex) {
+    return undefined;
+  }
+  const textureId = await buildTextureEntry(tex, sceneTextures, textureMap);
+  if (textureId == null) {
+    return undefined;
+  }
+  const uvIndex = ((tex.coordinatesIndex ?? 0) | 0) === 1 ? 1 : 0;
+  return {
+    textureId,
+    texCoord: uvIndex,
+    wrapU: tex.wrapU ?? Texture.WRAP_ADDRESSMODE,
+    wrapV: tex.wrapV ?? Texture.WRAP_ADDRESSMODE,
+    transform: toUvTransform(tex.getTextureMatrix()),
+    srgb
+  };
+}
+
+async function buildSceneMaterial(
+  mat: Material | null | undefined,
+  sceneTextures: SceneTexture[],
+  textureMap: Map<number, number>
+): Promise<DiffuseMaterial> {
+  if (mat instanceof PBRMetallicRoughnessMaterial) {
+    return {
+      baseColor: vec3FromColor(mat.baseColor, [1, 1, 1]),
+      metallic: clamp01(mat.metallic ?? 1),
+      roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
+      baseColorTexture: await buildTextureRef(mat.baseTexture, true, sceneTextures, textureMap),
+      metallicRoughnessTexture: await buildTextureRef(mat.metallicRoughnessTexture, false, sceneTextures, textureMap)
+    };
+  }
+
+  if (mat instanceof PBRMaterial) {
+    return {
+      baseColor: vec3FromColor(mat.albedoColor, [1, 1, 1]),
+      metallic: clamp01(mat.metallic ?? 1),
+      roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
+      baseColorTexture: await buildTextureRef(mat.albedoTexture, true, sceneTextures, textureMap),
+      metallicRoughnessTexture: await buildTextureRef(mat.metallicTexture, false, sceneTextures, textureMap)
+    };
+  }
+
+  if (mat instanceof StandardMaterial) {
+    return {
+      baseColor: vec3FromColor(mat.diffuseColor, [0.8, 0.8, 0.8]),
+      metallic: 0,
+      roughness: 0.8,
+      baseColorTexture: await buildTextureRef(mat.diffuseTexture, true, sceneTextures, textureMap)
+    };
+  }
+
+  return { baseColor: [0.8, 0.8, 0.8], metallic: 0, roughness: 0.7 };
+}
+
+async function meshToTriangles(
+  mesh: Mesh,
+  getMaterialId: (mat: Material | null | undefined) => Promise<number>,
+  sharedMaterialId: number | null
+): Promise<TriangleMesh | null> {
+  const positionsRaw = mesh.getVerticesData(VertexBuffer.PositionKind);
+  const indicesRaw = mesh.getIndices();
+  if (!positionsRaw || !indicesRaw || indicesRaw.length < 3 || positionsRaw.length < 3) {
+    return null;
+  }
+
+  mesh.computeWorldMatrix(true);
+  const world = mesh.getWorldMatrix();
+  const outPositions = new Float32Array(positionsRaw.length);
+  const tmp = new Vector3();
+  for (let i = 0; i < positionsRaw.length; i += 3) {
+    Vector3.TransformCoordinatesFromFloatsToRef(
+      positionsRaw[i + 0],
+      positionsRaw[i + 1],
+      positionsRaw[i + 2],
+      world,
+      tmp
+    );
+    outPositions[i + 0] = tmp.x;
+    outPositions[i + 1] = tmp.y;
+    outPositions[i + 2] = tmp.z;
+  }
+
+  const indices = new Uint32Array(indicesRaw.length);
+  for (let i = 0; i < indicesRaw.length; i++) {
+    indices[i] = indicesRaw[i];
+  }
+
+  const uv0Raw = mesh.getVerticesData(VertexBuffer.UVKind);
+  const uv1Raw = mesh.getVerticesData(VertexBuffer.UV2Kind);
+  const uvs = uv0Raw && uv0Raw.length >= (positionsRaw.length / 3) * 2 ? new Float32Array(uv0Raw) : undefined;
+  const uv2s = uv1Raw && uv1Raw.length >= (positionsRaw.length / 3) * 2 ? new Float32Array(uv1Raw) : undefined;
+
+  const triCount = Math.floor(indices.length / 3);
+  if (sharedMaterialId != null) {
+    return {
+      type: "triangles",
+      positions: outPositions,
+      indices,
+      uvs,
+      uv2s,
+      materialId: sharedMaterialId
+    };
+  }
+
+  const subMeshes = mesh.subMeshes ?? [];
+  if (!subMeshes.length || !(mesh.material instanceof MultiMaterial)) {
+    const matId = await getMaterialId(mesh.material);
+    return {
+      type: "triangles",
+      positions: outPositions,
+      indices,
+      uvs,
+      uv2s,
+      materialId: matId
+    };
+  }
+
+  const materialIds = new Uint16Array(triCount);
+  const defaultId = await getMaterialId(mesh.material);
+  materialIds.fill(defaultId);
+
+  const multi = mesh.material as MultiMaterial;
+  for (const sm of subMeshes) {
+    const subMat = multi.getSubMaterial(sm.materialIndex);
+    const matId = await getMaterialId(subMat);
+    const triStart = Math.max(0, Math.floor(sm.indexStart / 3));
+    const triEnd = Math.min(triCount, Math.ceil((sm.indexStart + sm.indexCount) / 3));
+    for (let t = triStart; t < triEnd; t++) {
+      materialIds[t] = matId;
+    }
+  }
 
   return {
-    baseColor: [
-      clamp01(Number(f[0] ?? 1) * baseTexRgb[0]),
-      clamp01(Number(f[1] ?? 1) * baseTexRgb[1]),
-      clamp01(Number(f[2] ?? 1) * baseTexRgb[2])
-    ],
-    metallic: clamp01(Number(pbr.metallicFactor ?? 1) * (mrTex?.metal ?? 1)),
-    roughness: clamp01(Number(pbr.roughnessFactor ?? 1) * (mrTex?.rough ?? 1))
+    type: "triangles",
+    positions: outPositions,
+    indices,
+    uvs,
+    uv2s,
+    materialIds
   };
-}
-
-async function glbToTriangles(
-  buffer: ArrayBuffer,
-  materialBaseIndex: number,
-  mapMaterials: boolean
-): Promise<{ meshes: TriangleMesh[]; importedMaterials: DiffuseMaterial[] }> {
-  const chunks = parseChunks(buffer);
-  const jsonChunk = chunks.find((c) => c.type === JSON_CHUNK);
-  const binChunk = chunks.find((c) => c.type === BIN_CHUNK);
-  if (!jsonChunk || !binChunk) {
-    throw new Error("GLB missing JSON or BIN chunk");
-  }
-  const gltf = JSON.parse(new TextDecoder().decode(jsonChunk.data));
-  const imageAvg = await buildImageAverages(gltf, binChunk.data);
-  const roots = gatherNodes(gltf, gltf.scene ?? 0);
-  const meshes: TriangleMesh[] = [];
-  const importedMaterials: DiffuseMaterial[] = [];
-  const defaultMaterial: DiffuseMaterial = { baseColor: [0.8, 0.8, 0.8], metallic: 0, roughness: 0.7 };
-  const gltfMaterialToScene = new Map<number, number>();
-
-  const getSceneMaterialId = (primitiveMaterial: number | undefined): number => {
-    if (!mapMaterials || primitiveMaterial == null || primitiveMaterial < 0) {
-      if (!importedMaterials.length) {
-        importedMaterials.push(defaultMaterial);
-      }
-      return materialBaseIndex;
-    }
-    const cached = gltfMaterialToScene.get(primitiveMaterial);
-    if (cached != null) {
-      return cached;
-    }
-    const localIndex = importedMaterials.length;
-    importedMaterials.push(parseGltfMaterial(gltf, primitiveMaterial, imageAvg));
-    const sceneMaterialId = materialBaseIndex + localIndex;
-    gltfMaterialToScene.set(primitiveMaterial, sceneMaterialId);
-    return sceneMaterialId;
-  };
-
-  const walk = (nodeIndex: number, parent?: number[]) => {
-    const node = gltf.nodes[nodeIndex];
-    if (!node) {
-      return;
-    }
-    const world = composeNodeWorldMatrix(node, parent);
-    if (typeof node.mesh === "number") {
-      const mesh = gltf.meshes[node.mesh];
-      for (const primitive of mesh.primitives ?? []) {
-        const positionAccessor = primitive.attributes?.POSITION;
-        if (typeof positionAccessor !== "number") {
-          continue;
-        }
-        const positionsRaw = readAccessor(gltf, positionAccessor, binChunk.data);
-        if (!(positionsRaw instanceof Float32Array)) {
-          continue;
-        }
-        const indicesAccessor = primitive.indices;
-        let indicesRaw: Uint32Array;
-        if (typeof indicesAccessor === "number") {
-          const idx = readAccessor(gltf, indicesAccessor, binChunk.data);
-          if (idx instanceof Uint32Array) {
-            indicesRaw = idx;
-          } else if (idx instanceof Uint16Array) {
-            indicesRaw = new Uint32Array(idx.length);
-            for (let i = 0; i < idx.length; i++) {
-              indicesRaw[i] = idx[i];
-            }
-          } else {
-            throw new Error("Unsupported GLB index type");
-          }
-        } else {
-          const vc = positionsRaw.length / 3;
-          indicesRaw = new Uint32Array(vc);
-          for (let i = 0; i < vc; i++) {
-            indicesRaw[i] = i;
-          }
-        }
-
-        const positions = new Float32Array(positionsRaw.length);
-        for (let i = 0; i < positionsRaw.length; i += 3) {
-          const p = toVec3(positionsRaw, i);
-          const tp = transformPoint(world, p);
-          positions[i] = tp[0];
-          positions[i + 1] = tp[1];
-          positions[i + 2] = tp[2];
-        }
-
-        meshes.push({
-          type: "triangles",
-          positions,
-          indices: new Uint32Array(indicesRaw),
-          materialId: getSceneMaterialId(
-            typeof primitive.material === "number" ? primitive.material : undefined
-          )
-        });
-      }
-    }
-    for (const child of node.children ?? []) {
-      walk(child, world);
-    }
-  };
-
-  for (const root of roots) {
-    walk(root);
-  }
-  return { meshes, importedMaterials };
 }
 
 export async function importGlbIntoScene(
-  glbBuffer: ArrayBuffer,
+  importedMeshes: AbstractMesh[],
   current: SerializedScene,
   options?: GlbImportOptions
 ): Promise<SerializedScene> {
   const mapMaterials = options?.mapMaterials ?? true;
-  const materialBaseIndex = current.materials.length;
-  const { meshes, importedMaterials } = await glbToTriangles(glbBuffer, materialBaseIndex, mapMaterials);
-  if (!meshes.length) {
+  const sceneTextures: SceneTexture[] = [...(current.textures ?? [])];
+  const textureMap = new Map<number, number>();
+  const sceneMaterials: DiffuseMaterial[] = [...current.materials];
+  const materialMap = new Map<number, number>();
+  const defaultMaterialId = sceneMaterials.length;
+  const defaultMaterial: DiffuseMaterial = { baseColor: [0.8, 0.8, 0.8], metallic: 0, roughness: 0.7 };
+
+  if (!mapMaterials) {
+    sceneMaterials.push(defaultMaterial);
+  }
+
+  const getMaterialId = async (mat: Material | null | undefined): Promise<number> => {
+    if (!mapMaterials) {
+      return defaultMaterialId;
+    }
+    if (!mat) {
+      return defaultMaterialId;
+    }
+    const cached = materialMap.get(mat.uniqueId);
+    if (cached != null) {
+      return cached;
+    }
+    const id = sceneMaterials.length;
+    sceneMaterials.push(await buildSceneMaterial(mat, sceneTextures, textureMap));
+    materialMap.set(mat.uniqueId, id);
+    return id;
+  };
+
+  if (mapMaterials) {
+    sceneMaterials.push(defaultMaterial);
+  }
+
+  const sharedMaterialId = mapMaterials ? null : defaultMaterialId;
+  const objects: TriangleMesh[] = [];
+  for (const abs of importedMeshes) {
+    if (!(abs instanceof Mesh)) {
+      continue;
+    }
+    const tri = await meshToTriangles(abs, getMaterialId, sharedMaterialId);
+    if (tri) {
+      if (tri.materialId == null && !tri.materialIds) {
+        tri.materialId = defaultMaterialId;
+      }
+      objects.push(tri);
+    }
+  }
+
+  if (!objects.length) {
     throw new Error("No supported mesh primitives found in GLB");
   }
+
   return {
-    materials: [...current.materials, ...importedMaterials],
-    objects: [...current.objects, ...meshes]
+    materials: sceneMaterials,
+    textures: sceneTextures,
+    objects: [...current.objects, ...objects]
   };
 }

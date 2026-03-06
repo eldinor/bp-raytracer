@@ -10,6 +10,7 @@ type Callbacks = {
   onLightIntensityChange: (value: number) => void;
   onShadowDarknessChange: (value: number) => void;
   onFireflyClampChange: (value: number) => void;
+  onFireflySuppressionChange: (value: number) => void;
   onBlendMixChange: (value: number) => void;
 };
 
@@ -19,6 +20,7 @@ export type Controls = {
   getLightIntensity: () => number;
   getShadowDarkness: () => number;
   getFireflyClamp: () => number;
+  getFireflySuppression: () => number;
   getSpp: () => number;
   getMaxBounces: () => number;
   setStatus: (status: UiStatus) => void;
@@ -112,6 +114,22 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     callbacks.onFireflyClampChange(Math.max(2, Math.min(40, v)));
   });
 
+  const suppressLabel = makeLabel("Firefly suppression");
+  const suppressInput = document.createElement("input");
+  suppressInput.type = "range";
+  suppressInput.min = "1";
+  suppressInput.max = "6";
+  suppressInput.step = "0.1";
+  suppressInput.value = "3.0";
+  const suppressValue = document.createElement("div");
+  suppressValue.className = "row-label";
+  suppressValue.textContent = "3.0";
+  suppressInput.addEventListener("input", () => {
+    const v = Number.parseFloat(suppressInput.value);
+    suppressValue.textContent = v.toFixed(1);
+    callbacks.onFireflySuppressionChange(Math.max(1, Math.min(6, v)));
+  });
+
   const blendLabel = makeLabel("Mix (RT overlay)");
   const blendInput = document.createElement("input");
   blendInput.type = "range";
@@ -177,6 +195,9 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     fireflyLabel,
     fireflyInput,
     fireflyValue,
+    suppressLabel,
+    suppressInput,
+    suppressValue,
     blendLabel,
     blendInput,
     blendValue,
@@ -206,6 +227,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     getFireflyClamp: () => {
       const v = Number.parseFloat(fireflyInput.value);
       return Number.isFinite(v) ? Math.max(2, Math.min(40, v)) : 40;
+    },
+    getFireflySuppression: () => {
+      const v = Number.parseFloat(suppressInput.value);
+      return Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 3;
     },
     getSpp: () => Math.max(1, Number.parseInt(sppInput.value, 10) || 1),
     getMaxBounces: () => Math.max(1, Number.parseInt(bouncesInput.value, 10) || 1),

@@ -1,4 +1,4 @@
-import type { Box, Plane, SerializedScene, Sphere, TriangleMesh, Vec3 } from "../scene/types";
+import type { Box, MaterialTextureRef, Plane, SerializedScene, Sphere, TriangleMesh, Vec2, Vec3 } from "../scene/types";
 import { TriangleBvh, type Hit, type Ray } from "./bvh";
 import { EPS, Rng, add, clamp01, dot, hash4, mul, normalize, sub } from "./math";
 
@@ -18,6 +18,7 @@ export type RenderSettings = {
   lightIntensity?: number;
   shadowDarkness?: number;
   fireflyClamp?: number;
+  fireflySuppression?: number;
   tileSize?: number;
   partialInterval?: number;
   camera: RenderCamera;
@@ -33,6 +34,8 @@ type PbrMaterial = {
   baseColor: Vec3;
   metallic: number;
   roughness: number;
+  baseColorTexture?: MaterialTextureRef;
+  metallicRoughnessTexture?: MaterialTextureRef;
 };
 
 const PI = Math.PI;
@@ -42,6 +45,9 @@ const ambient = 0.01;
 const SHADOW_BIAS = 1e-2;
 const MAX_THROUGHPUT = 8.0;
 const DEFAULT_MAX_SAMPLE_LUMINANCE = 12.0;
+const FIREFLY_NEIGHBOR_BOOST = 3.0;
+const FIREFLY_CENTER_WEIGHT = 0.15;
+const FIREFLY_TRIGGER_RATIO = 1.35;
 
 function mulVec(a: Vec3, b: Vec3): Vec3 {
   return [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
@@ -90,7 +96,9 @@ function getMaterial(scene: SerializedScene, materialId: number): PbrMaterial {
   return {
     baseColor: m?.baseColor ?? [1, 1, 1],
     metallic: Math.max(0, Math.min(1, m?.metallic ?? 0)),
-    roughness: Math.max(0.04, Math.min(1, m?.roughness ?? 0.7))
+    roughness: Math.max(0.04, Math.min(1, m?.roughness ?? 0.7)),
+    baseColorTexture: m?.baseColorTexture,
+    metallicRoughnessTexture: m?.metallicRoughnessTexture
   };
 }
 
@@ -113,7 +121,7 @@ function intersectSphere(ray: Ray, s: Sphere, tMax: number): Hit | null {
   }
   const p = add(ray.o, mul(ray.d, t));
   const n = normalize(sub(p, s.center));
-  return { t, normal: n, materialId: s.materialId };
+  return { t, normal: n, materialId: s.materialId, uv0: [0, 0], uv1: [0, 0] };
 }
 
 function intersectPlane(ray: Ray, p: Plane, tMax: number): Hit | null {
@@ -126,7 +134,7 @@ function intersectPlane(ray: Ray, p: Plane, tMax: number): Hit | null {
   if (t <= EPS || t >= tMax) {
     return null;
   }
-  return { t, normal: den < 0 ? n : mul(n, -1), materialId: p.materialId };
+  return { t, normal: den < 0 ? n : mul(n, -1), materialId: p.materialId, uv0: [0, 0], uv1: [0, 0] };
 }
 
 function intersectBox(ray: Ray, b: Box, tMax: number): Hit | null {
@@ -167,7 +175,7 @@ function intersectBox(ray: Ray, b: Box, tMax: number): Hit | null {
   const p = add(ray.o, mul(ray.d, tNear));
   const n: Vec3 = [0, 0, 0];
   n[hitAxis] = p[hitAxis] > b.center[hitAxis] ? 1 : -1;
-  return { t: tNear, normal: n, materialId: b.materialId };
+  return { t: tNear, normal: n, materialId: b.materialId, uv0: [0, 0], uv1: [0, 0] };
 }
 
 function intersectScene(ray: Ray, scene: SerializedScene, triBvh: TriangleBvh | null, tMax = Infinity): HitRecord | null {
@@ -209,6 +217,98 @@ function isOccluded(origin: Vec3, dir: Vec3, scene: SerializedScene, triBvh: Tri
 function toSrgb8(x: number): number {
   const g = Math.pow(clamp01(x), 1 / 2.2);
   return Math.round(g * 255);
+}
+
+function srgbToLinear(x: number): number {
+  const c = clamp01(x);
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+function wrapUv(v: number, mode: number): number {
+  if (mode === 0) {
+    return clamp01(v);
+  }
+  if (mode === 2) {
+    const t = ((v % 2) + 2) % 2;
+    return t <= 1 ? t : 2 - t;
+  }
+  return v - Math.floor(v);
+}
+
+function sampleTextureRgba(scene: SerializedScene, texRef: MaterialTextureRef, uv0: Vec2, uv1: Vec2): [number, number, number, number] {
+  const tex = scene.textures?.[texRef.textureId];
+  if (!tex || tex.width < 1 || tex.height < 1 || tex.rgba.length < tex.width * tex.height * 4) {
+    return [1, 1, 1, 1];
+  }
+
+  const uv = texRef.texCoord === 1 ? uv1 : uv0;
+  const t = texRef.transform;
+  const tu0 = t[0] * uv[0] + t[1] * uv[1] + t[2];
+  const tv0 = t[3] * uv[0] + t[4] * uv[1] + t[5];
+  const u = wrapUv(tu0, texRef.wrapU);
+  const v = wrapUv(tv0, texRef.wrapV);
+  const x = u * (tex.width - 1);
+  const y = (1 - v) * (tex.height - 1);
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(tex.width - 1, x0 + 1);
+  const y1 = Math.min(tex.height - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  const data = tex.rgba;
+
+  const idx = (px: number, py: number) => (py * tex.width + px) * 4;
+  const i00 = idx(x0, y0);
+  const i10 = idx(x1, y0);
+  const i01 = idx(x0, y1);
+  const i11 = idx(x1, y1);
+
+  const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
+  const c0r = lerp(data[i00 + 0], data[i10 + 0], tx);
+  const c0g = lerp(data[i00 + 1], data[i10 + 1], tx);
+  const c0b = lerp(data[i00 + 2], data[i10 + 2], tx);
+  const c0a = lerp(data[i00 + 3], data[i10 + 3], tx);
+  const c1r = lerp(data[i01 + 0], data[i11 + 0], tx);
+  const c1g = lerp(data[i01 + 1], data[i11 + 1], tx);
+  const c1b = lerp(data[i01 + 2], data[i11 + 2], tx);
+  const c1a = lerp(data[i01 + 3], data[i11 + 3], tx);
+
+  const r = lerp(c0r, c1r, ty) / 255;
+  const g = lerp(c0g, c1g, ty) / 255;
+  const b = lerp(c0b, c1b, ty) / 255;
+  const a = lerp(c0a, c1a, ty) / 255;
+
+  if (texRef.srgb) {
+    return [srgbToLinear(r), srgbToLinear(g), srgbToLinear(b), a];
+  }
+  return [r, g, b, a];
+}
+
+function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: Vec2, uv1: Vec2): PbrMaterial {
+  let baseColor = mat.baseColor;
+  let metallic = mat.metallic;
+  let roughness = mat.roughness;
+
+  if (mat.baseColorTexture) {
+    const tex = sampleTextureRgba(scene, mat.baseColorTexture, uv0, uv1);
+    baseColor = [
+      clamp01(baseColor[0] * tex[0]),
+      clamp01(baseColor[1] * tex[1]),
+      clamp01(baseColor[2] * tex[2])
+    ];
+  }
+
+  if (mat.metallicRoughnessTexture) {
+    const tex = sampleTextureRgba(scene, mat.metallicRoughnessTexture, uv0, uv1);
+    roughness = Math.max(0.04, clamp01(roughness * tex[1]));
+    metallic = clamp01(metallic * tex[2]);
+  }
+
+  return {
+    baseColor,
+    metallic,
+    roughness
+  };
 }
 
 function buildGuides(
@@ -327,6 +427,59 @@ function denoiseAtrous(
   }
 
   return src;
+}
+
+function suppressFireflies(
+  color: Float32Array,
+  width: number,
+  height: number,
+  maxLum: number,
+  neighborBoost = FIREFLY_NEIGHBOR_BOOST
+): Float32Array {
+  const out = new Float32Array(color.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      const i3 = i * 3;
+      const c: Vec3 = [color[i3 + 0], color[i3 + 1], color[i3 + 2]];
+      const cLum = luminance(c);
+      let sumLum = 0;
+      let sumW = 0;
+
+      for (let ky = -1; ky <= 1; ky++) {
+        const sy = y + ky;
+        if (sy < 0 || sy >= height) {
+          continue;
+        }
+        for (let kx = -1; kx <= 1; kx++) {
+          const sx = x + kx;
+          if (sx < 0 || sx >= width) {
+            continue;
+          }
+          const j = (sy * width + sx) * 3;
+          const nLum = luminance([color[j + 0], color[j + 1], color[j + 2]]);
+          const w = kx === 0 && ky === 0 ? FIREFLY_CENTER_WEIGHT : 1;
+          sumLum += nLum * w;
+          sumW += w;
+        }
+      }
+
+      const localLum = sumLum / Math.max(1e-8, sumW);
+      const allowedLum = Math.max(maxLum, localLum * neighborBoost);
+      const triggerLum = allowedLum * FIREFLY_TRIGGER_RATIO;
+      if (cLum > triggerLum && cLum > 1e-8) {
+        const s = allowedLum / cLum;
+        out[i3 + 0] = c[0] * s;
+        out[i3 + 1] = c[1] * s;
+        out[i3 + 2] = c[2] * s;
+      } else {
+        out[i3 + 0] = c[0];
+        out[i3 + 1] = c[1];
+        out[i3 + 2] = c[2];
+      }
+    }
+  }
+  return out;
 }
 
 function fract(x: number): number {
@@ -533,7 +686,8 @@ function tracePath(
       break;
     }
 
-    const mat = getMaterial(scene, hit.materialId);
+    const baseMat = getMaterial(scene, hit.materialId);
+    const mat = evaluateSurfaceMaterial(scene, baseMat, hit.uv0, hit.uv1);
     const n = hit.normal;
     const wo = mul(rd, -1);
 
@@ -602,6 +756,10 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const lightIntensity = settings.lightIntensity ?? 1;
   const shadowDarkness = Math.max(0, Math.min(1, settings.shadowDarkness ?? 1));
   const maxSampleLuminance = Math.max(1, settings.fireflyClamp ?? DEFAULT_MAX_SAMPLE_LUMINANCE);
+  const fireflySuppression = Math.max(1, Math.min(6, settings.fireflySuppression ?? FIREFLY_NEIGHBOR_BOOST));
+  // UI semantics: higher slider value => stronger suppression.
+  // Convert to neighbor boost: lower boost means stricter outlier clamp.
+  const neighborBoost = 6.5 - fireflySuppression * 0.8;
   const tileSize = Math.max(8, settings.tileSize ?? 32);
   const partialInterval = Math.max(1, settings.partialInterval ?? 4);
   const accum = new Float32Array(width * height * 3);
@@ -666,8 +824,9 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   for (let i = 0; i < accum.length; i++) {
     linear[i] = accum[i] * invSpp;
   }
+  const deFireflied = suppressFireflies(linear, width, height, maxSampleLuminance, neighborBoost);
   const guides = buildGuides(width, height, camera, scene, triBvh);
-  const denoised = denoiseAtrous(linear, width, height, guides.depth, guides.normal, 2);
+  const denoised = denoiseAtrous(deFireflied, width, height, guides.depth, guides.normal, 2);
 
   for (let i = 0, p = 0; i < denoised.length; i += 3, p += 4) {
     rgba[p + 0] = toSrgb8(denoised[i + 0]);

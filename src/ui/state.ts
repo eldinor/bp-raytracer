@@ -25,6 +25,7 @@ export type AppState = {
   lightIntensity: number;
   shadowDarkness: number;
   fireflyClamp: number;
+  fireflySuppression: number;
   blendMix: number;
   spp: number;
   maxBounces: number;

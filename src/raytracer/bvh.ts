@@ -1,4 +1,4 @@
-import type { TriangleMesh, Vec3 } from "../scene/types";
+import type { TriangleMesh, Vec2, Vec3 } from "../scene/types";
 import { EPS, cross, dot, sub } from "./math";
 
 export type Ray = { o: Vec3; d: Vec3 };
@@ -7,6 +7,8 @@ export type Hit = {
   t: number;
   normal: Vec3;
   materialId: number;
+  uv0: Vec2;
+  uv1: Vec2;
 };
 
 type TriData = {
@@ -94,7 +96,7 @@ function intersectAabbTNear(ray: Ray, min: Vec3, max: Vec3, tMax: number): numbe
   return t0;
 }
 
-function intersectTri(ray: Ray, a: Vec3, b: Vec3, c: Vec3, tMax: number): { t: number; n: Vec3 } | null {
+function intersectTri(ray: Ray, a: Vec3, b: Vec3, c: Vec3, tMax: number): { t: number; n: Vec3; u: number; v: number } | null {
   const ab = sub(b, a);
   const ac = sub(c, a);
   const p = cross(ray.d, ac);
@@ -119,24 +121,39 @@ function intersectTri(ray: Ray, a: Vec3, b: Vec3, c: Vec3, tMax: number): { t: n
   }
   const n = cross(ab, ac);
   const len = Math.hypot(n[0], n[1], n[2]) || 1;
-  return { t, n: [n[0] / len, n[1] / len, n[2] / len] };
+  return { t, n: [n[0] / len, n[1] / len, n[2] / len], u, v };
 }
 
 export class TriangleBvh {
   private readonly positions: Float32Array;
+  private readonly uvs: Float32Array;
+  private readonly uv2s: Float32Array;
   private triRefs: number[];
   private tris: TriData[];
   private readonly nodes: BvhNode[];
 
   constructor(meshes: TriangleMesh[]) {
     const mergedPositions: number[] = [];
+    const mergedUv0: number[] = [];
+    const mergedUv1: number[] = [];
     const triData: TriData[] = [];
     let vertexOffset = 0;
 
     for (const mesh of meshes) {
       const pos = mesh.positions;
+      const vertexCount = Math.floor(pos.length / 3);
+      const uv0 = mesh.uvs;
+      const uv1 = mesh.uv2s;
       for (let i = 0; i < pos.length; i++) {
         mergedPositions.push(pos[i]);
+      }
+      for (let v = 0; v < vertexCount; v++) {
+        const u0 = uv0 ? uv0[v * 2 + 0] ?? 0 : 0;
+        const v0 = uv0 ? uv0[v * 2 + 1] ?? 0 : 0;
+        const u1 = uv1 ? uv1[v * 2 + 0] ?? u0 : u0;
+        const v1 = uv1 ? uv1[v * 2 + 1] ?? v0 : v0;
+        mergedUv0.push(u0, v0);
+        mergedUv1.push(u1, v1);
       }
       const defaultMat = mesh.materialId ?? 0;
       const triCount = Math.floor(mesh.indices.length / 3);
@@ -188,6 +205,8 @@ export class TriangleBvh {
     }
 
     this.positions = new Float32Array(mergedPositions);
+    this.uvs = new Float32Array(mergedUv0);
+    this.uv2s = new Float32Array(mergedUv1);
     this.tris = triData;
     this.triRefs = triData.map((_, i) => i);
     this.nodes = [];
@@ -380,6 +399,14 @@ export class TriangleBvh {
     return [this.positions[i * 3 + 0], this.positions[i * 3 + 1], this.positions[i * 3 + 2]];
   }
 
+  private getUv0(i: number): Vec2 {
+    return [this.uvs[i * 2 + 0], this.uvs[i * 2 + 1]];
+  }
+
+  private getUv1(i: number): Vec2 {
+    return [this.uv2s[i * 2 + 0], this.uv2s[i * 2 + 1]];
+  }
+
   intersect(ray: Ray, tMax = Number.POSITIVE_INFINITY): Hit | null {
     if (!this.nodes.length) {
       return null;
@@ -405,7 +432,26 @@ export class TriangleBvh {
           const hit = intersectTri(ray, a, b, c, bestT);
           if (hit && hit.t < bestT) {
             bestT = hit.t;
-            best = { t: hit.t, normal: hit.n, materialId: tri.materialId };
+            const w = 1 - hit.u - hit.v;
+            const uv0a = this.getUv0(tri.i0);
+            const uv0b = this.getUv0(tri.i1);
+            const uv0c = this.getUv0(tri.i2);
+            const uv1a = this.getUv1(tri.i0);
+            const uv1b = this.getUv1(tri.i1);
+            const uv1c = this.getUv1(tri.i2);
+            best = {
+              t: hit.t,
+              normal: hit.n,
+              materialId: tri.materialId,
+              uv0: [
+                uv0a[0] * w + uv0b[0] * hit.u + uv0c[0] * hit.v,
+                uv0a[1] * w + uv0b[1] * hit.u + uv0c[1] * hit.v
+              ],
+              uv1: [
+                uv1a[0] * w + uv1b[0] * hit.u + uv1c[0] * hit.v,
+                uv1a[1] * w + uv1b[1] * hit.u + uv1c[1] * hit.v
+              ]
+            };
           }
         }
       } else {

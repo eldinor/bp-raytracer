@@ -138,12 +138,13 @@ function clearImportedPreviewMeshes(): void {
   importedPreviewMeshes = [];
 }
 
-async function loadGlbPreview(file: File): Promise<void> {
+async function loadGlbPreview(file: File): Promise<AbstractMesh[]> {
   const url = URL.createObjectURL(file);
   try {
     const result = await SceneLoader.ImportMeshAsync(undefined, "", url, previewScene, undefined, ".glb");
     const meshes = result.meshes.filter((m) => m.name !== "__root__");
     importedPreviewMeshes.push(...meshes);
+    return meshes;
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -178,6 +179,7 @@ const state: AppState = {
   lightIntensity: 0.7,
   shadowDarkness: 0.8,
   fireflyClamp: 40,
+  fireflySuppression: 3.0,
   blendMix: 0.5,
   spp: 4,
   maxBounces: 4,
@@ -253,13 +255,13 @@ function applyBlendMix(mix: number): void {
 }
 
 async function importGlbFile(file: File): Promise<void> {
-  const bytes = await file.arrayBuffer();
   state.glbMatMapping = controls.getGlbMatMapping();
-  state.scene = await importGlbIntoScene(bytes, state.scene, { mapMaterials: state.glbMatMapping });
   try {
-    await loadGlbPreview(file);
+    const meshes = await loadGlbPreview(file);
+    state.scene = await importGlbIntoScene(meshes, state.scene, { mapMaterials: state.glbMatMapping });
   } catch (err) {
-    console.warn("GLB preview import failed, keeping raytracer import:", err);
+    console.warn("GLB import failed:", err);
+    throw err;
   }
   rebuildPreview(state.scene);
   resultCanvas.style.display = "none";
@@ -274,6 +276,7 @@ controls = createControls(ui, {
     state.lightIntensity = controls.getLightIntensity();
     state.shadowDarkness = controls.getShadowDarkness();
     state.fireflyClamp = controls.getFireflyClamp();
+    state.fireflySuppression = controls.getFireflySuppression();
     state.spp = controls.getSpp();
     state.maxBounces = controls.getMaxBounces();
     applyPreviewLightIntensity(state.lightIntensity);
@@ -295,6 +298,7 @@ controls = createControls(ui, {
       lightIntensity: state.lightIntensity,
       shadowDarkness: state.shadowDarkness,
       fireflyClamp: state.fireflyClamp,
+      fireflySuppression: state.fireflySuppression,
       tileSize: 32,
       partialInterval: 4,
       camera: state.camera,
@@ -407,6 +411,9 @@ controls = createControls(ui, {
   },
   onBlendMixChange: (value) => {
     applyBlendMix(value);
+  },
+  onFireflySuppressionChange: (value) => {
+    state.fireflySuppression = value;
   },
 });
 
