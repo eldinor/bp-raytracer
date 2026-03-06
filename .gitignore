@@ -1,1 +1,11 @@
-/webgl2_static_raytracer_spec.md
+node_modules/
+dist/
+.vite/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db

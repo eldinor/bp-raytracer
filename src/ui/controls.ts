@@ -15,6 +15,7 @@ type Callbacks = {
 
 export type Controls = {
   getResolution: () => ResolutionOption;
+  getGlbMatMapping: () => boolean;
   getLightIntensity: () => number;
   getShadowDarkness: () => number;
   getFireflyClamp: () => number;
@@ -54,7 +55,7 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   sppInput.type = "number";
   sppInput.min = "1";
   sppInput.step = "1";
-  sppInput.value = "200";
+  sppInput.value = "4";
 
   const bouncesLabel = makeLabel("Max bounces");
   const bouncesInput = document.createElement("input");
@@ -85,10 +86,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   shadowInput.min = "0";
   shadowInput.max = "1";
   shadowInput.step = "0.01";
-  shadowInput.value = "1";
+  shadowInput.value = "0.8";
   const shadowValue = document.createElement("div");
   shadowValue.className = "row-label";
-  shadowValue.textContent = "1.00";
+  shadowValue.textContent = "0.80";
   shadowInput.addEventListener("input", () => {
     const v = Number.parseFloat(shadowInput.value);
     shadowValue.textContent = v.toFixed(2);
@@ -101,10 +102,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   fireflyInput.min = "2";
   fireflyInput.max = "40";
   fireflyInput.step = "1";
-  fireflyInput.value = "12";
+  fireflyInput.value = "40";
   const fireflyValue = document.createElement("div");
   fireflyValue.className = "row-label";
-  fireflyValue.textContent = "12";
+  fireflyValue.textContent = "40";
   fireflyInput.addEventListener("input", () => {
     const v = Number.parseFloat(fireflyInput.value);
     fireflyValue.textContent = String(Math.round(v));
@@ -117,10 +118,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   blendInput.min = "0";
   blendInput.max = "1";
   blendInput.step = "0.01";
-  blendInput.value = "1.0";
+  blendInput.value = "0.5";
   const blendValue = document.createElement("div");
   blendValue.className = "row-label";
-  blendValue.textContent = "1.00";
+  blendValue.textContent = "0.50";
   blendInput.addEventListener("input", () => {
     const v = Number.parseFloat(blendInput.value);
     blendValue.textContent = v.toFixed(2);
@@ -142,6 +143,11 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   const importButton = document.createElement("button");
   importButton.textContent = "Import GLB";
   importButton.onclick = callbacks.onImportGlbClick;
+
+  const glbMapLabel = makeLabel("Mat mapping (GLB)");
+  const glbMapInput = document.createElement("input");
+  glbMapInput.type = "checkbox";
+  glbMapInput.checked = true;
 
   const exportButton = document.createElement("button");
   exportButton.textContent = "Export PNG";
@@ -178,6 +184,8 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     cancelButton,
     resetButton,
     importButton,
+    glbMapLabel,
+    glbMapInput,
     exportButton,
     exportMixButton,
     status
@@ -186,17 +194,18 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
 
   return {
     getResolution: () => resolution.value as ResolutionOption,
+    getGlbMatMapping: () => glbMapInput.checked,
     getLightIntensity: () => {
       const v = Number.parseFloat(lightInput.value);
       return Number.isFinite(v) ? Math.max(0, Math.min(2, v)) : 1;
     },
     getShadowDarkness: () => {
       const v = Number.parseFloat(shadowInput.value);
-      return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
+      return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.8;
     },
     getFireflyClamp: () => {
       const v = Number.parseFloat(fireflyInput.value);
-      return Number.isFinite(v) ? Math.max(2, Math.min(40, v)) : 12;
+      return Number.isFinite(v) ? Math.max(2, Math.min(40, v)) : 40;
     },
     getSpp: () => Math.max(1, Number.parseInt(sppInput.value, 10) || 1),
     getMaxBounces: () => Math.max(1, Number.parseInt(bouncesInput.value, 10) || 1),

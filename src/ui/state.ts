@@ -21,6 +21,7 @@ export type AppState = {
   renderingJobId: number | null;
   status: UiStatus;
   resolution: ResolutionOption;
+  glbMatMapping: boolean;
   lightIntensity: number;
   shadowDarkness: number;
   fireflyClamp: number;
