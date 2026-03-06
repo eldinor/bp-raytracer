@@ -11,6 +11,7 @@ type Callbacks = {
   onShadowDarknessChange: (value: number) => void;
   onFireflyClampChange: (value: number) => void;
   onFireflySuppressionChange: (value: number) => void;
+  onNormalStrengthChange: (value: number) => void;
   onBlendMixChange: (value: number) => void;
 };
 
@@ -21,6 +22,7 @@ export type Controls = {
   getShadowDarkness: () => number;
   getFireflyClamp: () => number;
   getFireflySuppression: () => number;
+  getNormalStrength: () => number;
   getSpp: () => number;
   getMaxBounces: () => number;
   setStatus: (status: UiStatus) => void;
@@ -73,12 +75,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   lightInput.max = "2";
   lightInput.step = "0.05";
   lightInput.value = "0.7";
-  const lightValue = document.createElement("div");
-  lightValue.className = "row-label";
-  lightValue.textContent = "0.70";
+  lightLabel.textContent = "Light intensity: 0.70";
   lightInput.addEventListener("input", () => {
     const v = Number.parseFloat(lightInput.value);
-    lightValue.textContent = v.toFixed(2);
+    lightLabel.textContent = `Light intensity: ${v.toFixed(2)}`;
     callbacks.onLightIntensityChange(Math.max(0, Math.min(2, v)));
   });
 
@@ -89,12 +89,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   shadowInput.max = "1";
   shadowInput.step = "0.01";
   shadowInput.value = "0.8";
-  const shadowValue = document.createElement("div");
-  shadowValue.className = "row-label";
-  shadowValue.textContent = "0.80";
+  shadowLabel.textContent = "Shadow darkness: 0.80";
   shadowInput.addEventListener("input", () => {
     const v = Number.parseFloat(shadowInput.value);
-    shadowValue.textContent = v.toFixed(2);
+    shadowLabel.textContent = `Shadow darkness: ${v.toFixed(2)}`;
     callbacks.onShadowDarknessChange(Math.max(0, Math.min(1, v)));
   });
 
@@ -105,12 +103,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   fireflyInput.max = "40";
   fireflyInput.step = "1";
   fireflyInput.value = "40";
-  const fireflyValue = document.createElement("div");
-  fireflyValue.className = "row-label";
-  fireflyValue.textContent = "40";
+  fireflyLabel.textContent = "Firefly clamp: 40";
   fireflyInput.addEventListener("input", () => {
     const v = Number.parseFloat(fireflyInput.value);
-    fireflyValue.textContent = String(Math.round(v));
+    fireflyLabel.textContent = `Firefly clamp: ${Math.round(v)}`;
     callbacks.onFireflyClampChange(Math.max(2, Math.min(40, v)));
   });
 
@@ -121,13 +117,25 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   suppressInput.max = "6";
   suppressInput.step = "0.1";
   suppressInput.value = "3.0";
-  const suppressValue = document.createElement("div");
-  suppressValue.className = "row-label";
-  suppressValue.textContent = "3.0";
+  suppressLabel.textContent = "Firefly suppression: 3.0";
   suppressInput.addEventListener("input", () => {
     const v = Number.parseFloat(suppressInput.value);
-    suppressValue.textContent = v.toFixed(1);
+    suppressLabel.textContent = `Firefly suppression: ${v.toFixed(1)}`;
     callbacks.onFireflySuppressionChange(Math.max(1, Math.min(6, v)));
+  });
+
+  const normalStrengthLabel = makeLabel("Normal strength");
+  const normalStrengthInput = document.createElement("input");
+  normalStrengthInput.type = "range";
+  normalStrengthInput.min = "0";
+  normalStrengthInput.max = "2";
+  normalStrengthInput.step = "0.05";
+  normalStrengthInput.value = "1.0";
+  normalStrengthLabel.textContent = "Normal strength: 1.00";
+  normalStrengthInput.addEventListener("input", () => {
+    const v = Number.parseFloat(normalStrengthInput.value);
+    normalStrengthLabel.textContent = `Normal strength: ${v.toFixed(2)}`;
+    callbacks.onNormalStrengthChange(Math.max(0, Math.min(2, v)));
   });
 
   const blendLabel = makeLabel("Mix (RT overlay)");
@@ -137,12 +145,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
   blendInput.max = "1";
   blendInput.step = "0.01";
   blendInput.value = "0.5";
-  const blendValue = document.createElement("div");
-  blendValue.className = "row-label";
-  blendValue.textContent = "0.50";
+  blendLabel.textContent = "Mix (RT overlay): 0.50";
   blendInput.addEventListener("input", () => {
     const v = Number.parseFloat(blendInput.value);
-    blendValue.textContent = v.toFixed(2);
+    blendLabel.textContent = `Mix (RT overlay): ${v.toFixed(2)}`;
     callbacks.onBlendMixChange(Math.max(0, Math.min(1, v)));
   });
 
@@ -188,19 +194,16 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     bouncesInput,
     lightLabel,
     lightInput,
-    lightValue,
     shadowLabel,
     shadowInput,
-    shadowValue,
     fireflyLabel,
     fireflyInput,
-    fireflyValue,
     suppressLabel,
     suppressInput,
-    suppressValue,
+    normalStrengthLabel,
+    normalStrengthInput,
     blendLabel,
     blendInput,
-    blendValue,
     renderButton,
     cancelButton,
     resetButton,
@@ -231,6 +234,10 @@ export function createControls(root: HTMLElement, callbacks: Callbacks): Control
     getFireflySuppression: () => {
       const v = Number.parseFloat(suppressInput.value);
       return Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 3;
+    },
+    getNormalStrength: () => {
+      const v = Number.parseFloat(normalStrengthInput.value);
+      return Number.isFinite(v) ? Math.max(0, Math.min(2, v)) : 1;
     },
     getSpp: () => Math.max(1, Number.parseInt(sppInput.value, 10) || 1),
     getMaxBounces: () => Math.max(1, Number.parseInt(bouncesInput.value, 10) || 1),

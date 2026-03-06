@@ -128,13 +128,18 @@ async function buildSceneMaterial(
   sceneTextures: SceneTexture[],
   textureMap: Map<number, number>
 ): Promise<DiffuseMaterial> {
+  const normalTextureCandidate = (mat as any)?.normalTexture ?? (mat as any)?.bumpTexture;
+  const normalScaleCandidate = (mat as any)?.normalTexture?.level ?? (mat as any)?.bumpTexture?.level ?? 1;
+
   if (mat instanceof PBRMetallicRoughnessMaterial) {
     return {
       baseColor: vec3FromColor(mat.baseColor, [1, 1, 1]),
       metallic: clamp01(mat.metallic ?? 1),
       roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
       baseColorTexture: await buildTextureRef(mat.baseTexture, true, sceneTextures, textureMap),
-      metallicRoughnessTexture: await buildTextureRef(mat.metallicRoughnessTexture, false, sceneTextures, textureMap)
+      metallicRoughnessTexture: await buildTextureRef(mat.metallicRoughnessTexture, false, sceneTextures, textureMap),
+      normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
+      normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
     };
   }
 
@@ -144,7 +149,9 @@ async function buildSceneMaterial(
       metallic: clamp01(mat.metallic ?? 1),
       roughness: Math.max(0.04, clamp01(mat.roughness ?? 1)),
       baseColorTexture: await buildTextureRef(mat.albedoTexture, true, sceneTextures, textureMap),
-      metallicRoughnessTexture: await buildTextureRef(mat.metallicTexture, false, sceneTextures, textureMap)
+      metallicRoughnessTexture: await buildTextureRef(mat.metallicTexture, false, sceneTextures, textureMap),
+      normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
+      normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
     };
   }
 
@@ -153,7 +160,9 @@ async function buildSceneMaterial(
       baseColor: vec3FromColor(mat.diffuseColor, [0.8, 0.8, 0.8]),
       metallic: 0,
       roughness: 0.8,
-      baseColorTexture: await buildTextureRef(mat.diffuseTexture, true, sceneTextures, textureMap)
+      baseColorTexture: await buildTextureRef(mat.diffuseTexture, true, sceneTextures, textureMap),
+      normalTexture: await buildTextureRef(normalTextureCandidate, false, sceneTextures, textureMap),
+      normalScale: Math.max(0, Number(normalScaleCandidate) || 1)
     };
   }
 
@@ -195,14 +204,33 @@ async function meshToTriangles(
 
   const uv0Raw = mesh.getVerticesData(VertexBuffer.UVKind);
   const uv1Raw = mesh.getVerticesData(VertexBuffer.UV2Kind);
+  const normalsRaw = mesh.getVerticesData(VertexBuffer.NormalKind);
   const uvs = uv0Raw && uv0Raw.length >= (positionsRaw.length / 3) * 2 ? new Float32Array(uv0Raw) : undefined;
   const uv2s = uv1Raw && uv1Raw.length >= (positionsRaw.length / 3) * 2 ? new Float32Array(uv1Raw) : undefined;
+  let normals: Float32Array | undefined;
+  if (normalsRaw && normalsRaw.length >= positionsRaw.length) {
+    normals = new Float32Array(normalsRaw.length);
+    for (let i = 0; i < normalsRaw.length; i += 3) {
+      Vector3.TransformNormalFromFloatsToRef(
+        normalsRaw[i + 0],
+        normalsRaw[i + 1],
+        normalsRaw[i + 2],
+        world,
+        tmp
+      );
+      const len = Math.hypot(tmp.x, tmp.y, tmp.z) || 1;
+      normals[i + 0] = tmp.x / len;
+      normals[i + 1] = tmp.y / len;
+      normals[i + 2] = tmp.z / len;
+    }
+  }
 
   const triCount = Math.floor(indices.length / 3);
   if (sharedMaterialId != null) {
     return {
       type: "triangles",
       positions: outPositions,
+      normals,
       indices,
       uvs,
       uv2s,
@@ -216,6 +244,7 @@ async function meshToTriangles(
     return {
       type: "triangles",
       positions: outPositions,
+      normals,
       indices,
       uvs,
       uv2s,
@@ -241,6 +270,7 @@ async function meshToTriangles(
   return {
     type: "triangles",
     positions: outPositions,
+    normals,
     indices,
     uvs,
     uv2s,

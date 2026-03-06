@@ -19,6 +19,7 @@ export type RenderSettings = {
   shadowDarkness?: number;
   fireflyClamp?: number;
   fireflySuppression?: number;
+  normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
   camera: RenderCamera;
@@ -36,6 +37,8 @@ type PbrMaterial = {
   roughness: number;
   baseColorTexture?: MaterialTextureRef;
   metallicRoughnessTexture?: MaterialTextureRef;
+  normalTexture?: MaterialTextureRef;
+  normalScale: number;
 };
 
 const PI = Math.PI;
@@ -98,7 +101,9 @@ function getMaterial(scene: SerializedScene, materialId: number): PbrMaterial {
     metallic: Math.max(0, Math.min(1, m?.metallic ?? 0)),
     roughness: Math.max(0.04, Math.min(1, m?.roughness ?? 0.7)),
     baseColorTexture: m?.baseColorTexture,
-    metallicRoughnessTexture: m?.metallicRoughnessTexture
+    metallicRoughnessTexture: m?.metallicRoughnessTexture,
+    normalTexture: m?.normalTexture,
+    normalScale: Math.max(0, m?.normalScale ?? 1)
   };
 }
 
@@ -121,7 +126,16 @@ function intersectSphere(ray: Ray, s: Sphere, tMax: number): Hit | null {
   }
   const p = add(ray.o, mul(ray.d, t));
   const n = normalize(sub(p, s.center));
-  return { t, normal: n, materialId: s.materialId, uv0: [0, 0], uv1: [0, 0] };
+  return {
+    t,
+    normal: n,
+    geomNormal: n,
+    tangent: [1, 0, 0],
+    bitangent: [0, 0, 1],
+    materialId: s.materialId,
+    uv0: [0, 0],
+    uv1: [0, 0]
+  };
 }
 
 function intersectPlane(ray: Ray, p: Plane, tMax: number): Hit | null {
@@ -134,7 +148,17 @@ function intersectPlane(ray: Ray, p: Plane, tMax: number): Hit | null {
   if (t <= EPS || t >= tMax) {
     return null;
   }
-  return { t, normal: den < 0 ? n : mul(n, -1), materialId: p.materialId, uv0: [0, 0], uv1: [0, 0] };
+  const nn = den < 0 ? n : mul(n, -1);
+  return {
+    t,
+    normal: nn,
+    geomNormal: nn,
+    tangent: [1, 0, 0],
+    bitangent: [0, 0, 1],
+    materialId: p.materialId,
+    uv0: [0, 0],
+    uv1: [0, 0]
+  };
 }
 
 function intersectBox(ray: Ray, b: Box, tMax: number): Hit | null {
@@ -175,7 +199,16 @@ function intersectBox(ray: Ray, b: Box, tMax: number): Hit | null {
   const p = add(ray.o, mul(ray.d, tNear));
   const n: Vec3 = [0, 0, 0];
   n[hitAxis] = p[hitAxis] > b.center[hitAxis] ? 1 : -1;
-  return { t: tNear, normal: n, materialId: b.materialId, uv0: [0, 0], uv1: [0, 0] };
+  return {
+    t: tNear,
+    normal: n,
+    geomNormal: n,
+    tangent: [1, 0, 0],
+    bitangent: [0, 0, 1],
+    materialId: b.materialId,
+    uv0: [0, 0],
+    uv1: [0, 0]
+  };
 }
 
 function intersectScene(ray: Ray, scene: SerializedScene, triBvh: TriangleBvh | null, tMax = Infinity): HitRecord | null {
@@ -307,8 +340,48 @@ function evaluateSurfaceMaterial(scene: SerializedScene, mat: PbrMaterial, uv0: 
   return {
     baseColor,
     metallic,
-    roughness
+    roughness,
+    normalTexture: mat.normalTexture,
+    normalScale: mat.normalScale
   };
+}
+
+function applyNormalMap(
+  scene: SerializedScene,
+  mat: PbrMaterial,
+  uv0: Vec2,
+  uv1: Vec2,
+  nGeom: Vec3,
+  tangent: Vec3,
+  bitangent: Vec3,
+  globalNormalStrength: number
+): Vec3 {
+  const strength = mat.normalScale * globalNormalStrength;
+  if (!mat.normalTexture || strength <= 0) {
+    return nGeom;
+  }
+  const tex = sampleTextureRgba(scene, mat.normalTexture, uv0, uv1);
+  let tx = tex[0] * 2 - 1;
+  let ty = tex[1] * 2 - 1;
+  let tz = tex[2] * 2 - 1;
+  tx *= strength;
+  ty *= strength;
+  const tLen = Math.hypot(tx, ty, tz) || 1;
+  tx /= tLen;
+  ty /= tLen;
+  tz /= tLen;
+
+  let n: Vec3 = [
+    tangent[0] * tx + bitangent[0] * ty + nGeom[0] * tz,
+    tangent[1] * tx + bitangent[1] * ty + nGeom[1] * tz,
+    tangent[2] * tx + bitangent[2] * ty + nGeom[2] * tz
+  ];
+  const nLen = Math.hypot(n[0], n[1], n[2]) || 1;
+  n = [n[0] / nLen, n[1] / nLen, n[2] / nLen];
+  if (dot(n, nGeom) < 0) {
+    n = mul(n, -1);
+  }
+  return n;
 }
 
 function buildGuides(
@@ -670,7 +743,8 @@ function tracePath(
   maxBounces: number,
   lightIntensity: number,
   shadowDarkness: number,
-  maxSampleLuminance: number
+  maxSampleLuminance: number,
+  globalNormalStrength: number
 ): Vec3 {
   let ro = ray.o;
   let rd = ray.d;
@@ -688,10 +762,12 @@ function tracePath(
 
     const baseMat = getMaterial(scene, hit.materialId);
     const mat = evaluateSurfaceMaterial(scene, baseMat, hit.uv0, hit.uv1);
-    const n = hit.normal;
+    const ng = hit.geomNormal;
+    const nTex = applyNormalMap(scene, mat, hit.uv0, hit.uv1, hit.normal, hit.tangent, hit.bitangent, globalNormalStrength);
+    const n = dot(nTex, ng) > 0 ? nTex : ng;
     const wo = mul(rd, -1);
 
-    const shadowOrigin = add(hit.p, mul(n, SHADOW_BIAS));
+    const shadowOrigin = add(hit.p, mul(ng, SHADOW_BIAS));
     const visible = !isOccluded(shadowOrigin, lightDir, scene, triBvh);
     const shadowAtten = visible ? 1 : 1 - shadowDarkness;
     if (shadowAtten > 0) {
@@ -744,7 +820,7 @@ function tracePath(
       throughput = mul(throughput, 1 / p);
     }
 
-    ro = add(hit.p, mul(n, SHADOW_BIAS));
+    ro = add(hit.p, mul(ng, SHADOW_BIAS));
     rd = wi;
   }
 
@@ -757,6 +833,7 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
   const shadowDarkness = Math.max(0, Math.min(1, settings.shadowDarkness ?? 1));
   const maxSampleLuminance = Math.max(1, settings.fireflyClamp ?? DEFAULT_MAX_SAMPLE_LUMINANCE);
   const fireflySuppression = Math.max(1, Math.min(6, settings.fireflySuppression ?? FIREFLY_NEIGHBOR_BOOST));
+  const normalStrength = Math.max(0, Math.min(2, settings.normalStrength ?? 1));
   // UI semantics: higher slider value => stronger suppression.
   // Convert to neighbor boost: lower boost means stricter outlier clamp.
   const neighborBoost = 6.5 - fireflySuppression * 0.8;
@@ -789,7 +866,8 @@ export function renderScene(settings: RenderSettings): Uint8ClampedArray {
               maxBounces,
               lightIntensity,
               shadowDarkness,
-              maxSampleLuminance
+              maxSampleLuminance,
+              normalStrength
             );
             const i3 = (y * width + x) * 3;
             accum[i3 + 0] += color[0];

@@ -15,6 +15,7 @@ type RenderMsg = {
   shadowDarkness?: number;
   fireflyClamp?: number;
   fireflySuppression?: number;
+  normalStrength?: number;
   tileSize?: number;
   partialInterval?: number;
   camera: {

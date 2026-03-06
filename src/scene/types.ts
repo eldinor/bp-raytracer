@@ -22,6 +22,8 @@ export type DiffuseMaterial = {
   roughness?: number;
   baseColorTexture?: MaterialTextureRef;
   metallicRoughnessTexture?: MaterialTextureRef;
+  normalTexture?: MaterialTextureRef;
+  normalScale?: number;
 };
 
 export type Sphere = {
@@ -48,6 +50,7 @@ export type Plane = {
 export type TriangleMesh = {
   type: "triangles";
   positions: Float32Array;
+  normals?: Float32Array;
   indices: Uint32Array;
   uvs?: Float32Array;
   uv2s?: Float32Array;

@@ -32,11 +32,12 @@ style.textContent = `
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: "Segoe UI", sans-serif; background: #111; }
   #viewport { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; }
   #ui { position: fixed; top: 12px; left: 12px; color: #f4f4f4; z-index: 10; }
-  .panel { display: grid; gap: 6px; width: 220px; padding: 12px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
-  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 6px; }
+  .panel { display: grid; gap: 4px; width: 220px; padding: 8px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
+  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 4px 6px; }
+  .panel input[type="range"] { padding: 0; }
   .panel button { cursor: pointer; }
-  .row-label { font-size: 12px; color: #c4ccd9; }
-  .status { margin-top: 2px; font-size: 13px; color: #9ed67c; }
+  .row-label { font-size: 11px; color: #c4ccd9; line-height: 1.1; }
+  .status { margin-top: 2px; font-size: 12px; color: #9ed67c; }
 `;
 document.head.appendChild(style);
 
@@ -180,6 +181,7 @@ const state: AppState = {
   shadowDarkness: 0.8,
   fireflyClamp: 40,
   fireflySuppression: 3.0,
+  normalStrength: 1.0,
   blendMix: 0.5,
   spp: 4,
   maxBounces: 4,
@@ -277,6 +279,7 @@ controls = createControls(ui, {
     state.shadowDarkness = controls.getShadowDarkness();
     state.fireflyClamp = controls.getFireflyClamp();
     state.fireflySuppression = controls.getFireflySuppression();
+    state.normalStrength = controls.getNormalStrength();
     state.spp = controls.getSpp();
     state.maxBounces = controls.getMaxBounces();
     applyPreviewLightIntensity(state.lightIntensity);
@@ -299,6 +302,7 @@ controls = createControls(ui, {
       shadowDarkness: state.shadowDarkness,
       fireflyClamp: state.fireflyClamp,
       fireflySuppression: state.fireflySuppression,
+      normalStrength: state.normalStrength,
       tileSize: 32,
       partialInterval: 4,
       camera: state.camera,
@@ -414,6 +418,9 @@ controls = createControls(ui, {
   },
   onFireflySuppressionChange: (value) => {
     state.fireflySuppression = value;
+  },
+  onNormalStrengthChange: (value) => {
+    state.normalStrength = value;
   },
 });
 

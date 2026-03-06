@@ -6,6 +6,9 @@ export type Ray = { o: Vec3; d: Vec3 };
 export type Hit = {
   t: number;
   normal: Vec3;
+  geomNormal: Vec3;
+  tangent: Vec3;
+  bitangent: Vec3;
   materialId: number;
   uv0: Vec2;
   uv1: Vec2;
@@ -16,6 +19,8 @@ type TriData = {
   i1: number;
   i2: number;
   materialId: number;
+  tangent: Vec3;
+  bitangent: Vec3;
   min: Vec3;
   max: Vec3;
   centroid: Vec3;
@@ -126,6 +131,7 @@ function intersectTri(ray: Ray, a: Vec3, b: Vec3, c: Vec3, tMax: number): { t: n
 
 export class TriangleBvh {
   private readonly positions: Float32Array;
+  private readonly normals: Float32Array;
   private readonly uvs: Float32Array;
   private readonly uv2s: Float32Array;
   private triRefs: number[];
@@ -134,6 +140,7 @@ export class TriangleBvh {
 
   constructor(meshes: TriangleMesh[]) {
     const mergedPositions: number[] = [];
+    const mergedNormals: number[] = [];
     const mergedUv0: number[] = [];
     const mergedUv1: number[] = [];
     const triData: TriData[] = [];
@@ -144,10 +151,15 @@ export class TriangleBvh {
       const vertexCount = Math.floor(pos.length / 3);
       const uv0 = mesh.uvs;
       const uv1 = mesh.uv2s;
+      const nrm = mesh.normals;
       for (let i = 0; i < pos.length; i++) {
         mergedPositions.push(pos[i]);
       }
       for (let v = 0; v < vertexCount; v++) {
+        const nx = nrm ? nrm[v * 3 + 0] ?? 0 : 0;
+        const ny = nrm ? nrm[v * 3 + 1] ?? 1 : 1;
+        const nz = nrm ? nrm[v * 3 + 2] ?? 0 : 0;
+        mergedNormals.push(nx, ny, nz);
         const u0 = uv0 ? uv0[v * 2 + 0] ?? 0 : 0;
         const v0 = uv0 ? uv0[v * 2 + 1] ?? 0 : 0;
         const u1 = uv1 ? uv1[v * 2 + 0] ?? u0 : u0;
@@ -191,11 +203,62 @@ export class TriangleBvh {
           (a[1] + b[1] + c[1]) / 3,
           (a[2] + b[2] + c[2]) / 3
         ];
+        const uv0a: Vec2 = [
+          mergedUv0[i0 * 2 + 0],
+          mergedUv0[i0 * 2 + 1]
+        ];
+        const uv0b: Vec2 = [
+          mergedUv0[i1 * 2 + 0],
+          mergedUv0[i1 * 2 + 1]
+        ];
+        const uv0c: Vec2 = [
+          mergedUv0[i2 * 2 + 0],
+          mergedUv0[i2 * 2 + 1]
+        ];
+        const dPos1 = sub(b, a);
+        const dPos2 = sub(c, a);
+        const dU1 = uv0b[0] - uv0a[0];
+        const dV1 = uv0b[1] - uv0a[1];
+        const dU2 = uv0c[0] - uv0a[0];
+        const dV2 = uv0c[1] - uv0a[1];
+        const det = dU1 * dV2 - dV1 * dU2;
+        const faceN = cross(dPos1, dPos2);
+        const faceNLen = Math.hypot(faceN[0], faceN[1], faceN[2]) || 1;
+        const nFace: Vec3 = [faceN[0] / faceNLen, faceN[1] / faceNLen, faceN[2] / faceNLen];
+        let tangent: Vec3 = [1, 0, 0];
+        let bitangent: Vec3 = [0, 0, 1];
+        if (Math.abs(det) > 1e-8) {
+          const invDet = 1 / det;
+          tangent = [
+            (dPos1[0] * dV2 - dPos2[0] * dV1) * invDet,
+            (dPos1[1] * dV2 - dPos2[1] * dV1) * invDet,
+            (dPos1[2] * dV2 - dPos2[2] * dV1) * invDet
+          ];
+          bitangent = [
+            (dPos2[0] * dU1 - dPos1[0] * dU2) * invDet,
+            (dPos2[1] * dU1 - dPos1[1] * dU2) * invDet,
+            (dPos2[2] * dU1 - dPos1[2] * dU2) * invDet
+          ];
+          const tLen = Math.hypot(tangent[0], tangent[1], tangent[2]) || 1;
+          const bLen = Math.hypot(bitangent[0], bitangent[1], bitangent[2]) || 1;
+          tangent = [tangent[0] / tLen, tangent[1] / tLen, tangent[2] / tLen];
+          bitangent = [bitangent[0] / bLen, bitangent[1] / bLen, bitangent[2] / bLen];
+        } else {
+          const ref: Vec3 = Math.abs(nFace[1]) < 0.99 ? [0, 1, 0] : [1, 0, 0];
+          tangent = cross(ref, nFace);
+          const tLen = Math.hypot(tangent[0], tangent[1], tangent[2]) || 1;
+          tangent = [tangent[0] / tLen, tangent[1] / tLen, tangent[2] / tLen];
+          bitangent = cross(nFace, tangent);
+          const bLen = Math.hypot(bitangent[0], bitangent[1], bitangent[2]) || 1;
+          bitangent = [bitangent[0] / bLen, bitangent[1] / bLen, bitangent[2] / bLen];
+        }
         triData.push({
           i0,
           i1,
           i2,
           materialId: mesh.materialIds?.[t] ?? defaultMat,
+          tangent,
+          bitangent,
           min,
           max,
           centroid
@@ -205,6 +268,7 @@ export class TriangleBvh {
     }
 
     this.positions = new Float32Array(mergedPositions);
+    this.normals = new Float32Array(mergedNormals);
     this.uvs = new Float32Array(mergedUv0);
     this.uv2s = new Float32Array(mergedUv1);
     this.tris = triData;
@@ -407,6 +471,10 @@ export class TriangleBvh {
     return [this.uv2s[i * 2 + 0], this.uv2s[i * 2 + 1]];
   }
 
+  private getNormal(i: number): Vec3 {
+    return [this.normals[i * 3 + 0], this.normals[i * 3 + 1], this.normals[i * 3 + 2]];
+  }
+
   intersect(ray: Ray, tMax = Number.POSITIVE_INFINITY): Hit | null {
     if (!this.nodes.length) {
       return null;
@@ -433,6 +501,16 @@ export class TriangleBvh {
           if (hit && hit.t < bestT) {
             bestT = hit.t;
             const w = 1 - hit.u - hit.v;
+            const n0 = this.getNormal(tri.i0);
+            const n1 = this.getNormal(tri.i1);
+            const n2 = this.getNormal(tri.i2);
+            let nInterpolated: Vec3 = [
+              n0[0] * w + n1[0] * hit.u + n2[0] * hit.v,
+              n0[1] * w + n1[1] * hit.u + n2[1] * hit.v,
+              n0[2] * w + n1[2] * hit.u + n2[2] * hit.v
+            ];
+            const nLen = Math.hypot(nInterpolated[0], nInterpolated[1], nInterpolated[2]) || 1;
+            nInterpolated = [nInterpolated[0] / nLen, nInterpolated[1] / nLen, nInterpolated[2] / nLen];
             const uv0a = this.getUv0(tri.i0);
             const uv0b = this.getUv0(tri.i1);
             const uv0c = this.getUv0(tri.i2);
@@ -441,7 +519,10 @@ export class TriangleBvh {
             const uv1c = this.getUv1(tri.i2);
             best = {
               t: hit.t,
-              normal: hit.n,
+              normal: nInterpolated,
+              geomNormal: hit.n,
+              tangent: tri.tangent,
+              bitangent: tri.bitangent,
               materialId: tri.materialId,
               uv0: [
                 uv0a[0] * w + uv0b[0] * hit.u + uv0c[0] * hit.v,
