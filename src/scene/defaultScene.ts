@@ -5,7 +5,7 @@ function createCylinderMesh(
   radius: number,
   height: number,
   radialSegments: number,
-  materialId: number
+  materialId: number,
 ): TriangleMesh {
   const [cx, cy, cz] = center;
   const halfHeight = height * 0.5;
@@ -74,7 +74,7 @@ function createTorusMesh(
   minorRadius: number,
   radialSegments: number,
   tubularSegments: number,
-  materialId: number
+  materialId: number,
 ): TriangleMesh {
   const [cx, cy, cz] = center;
   const positions: number[] = [];
@@ -126,20 +126,10 @@ function createTorusMesh(
 }
 
 function createQuadMesh(
-  corners: [
-    [number, number, number],
-    [number, number, number],
-    [number, number, number],
-    [number, number, number]
-  ],
-  materialId: number
+  corners: [[number, number, number], [number, number, number], [number, number, number], [number, number, number]],
+  materialId: number,
 ): TriangleMesh {
-  const positions = new Float32Array([
-    ...corners[0],
-    ...corners[1],
-    ...corners[2],
-    ...corners[3],
-  ]);
+  const positions = new Float32Array([...corners[0], ...corners[1], ...corners[2], ...corners[3]]);
   const edgeA: [number, number, number] = [
     corners[1][0] - corners[0][0],
     corners[1][1] - corners[0][1],
@@ -155,10 +145,18 @@ function createQuadMesh(
   const nz = edgeA[0] * edgeB[1] - edgeA[1] * edgeB[0];
   const nLen = Math.hypot(nx, ny, nz) || 1;
   const normals = new Float32Array([
-    nx / nLen, ny / nLen, nz / nLen,
-    nx / nLen, ny / nLen, nz / nLen,
-    nx / nLen, ny / nLen, nz / nLen,
-    nx / nLen, ny / nLen, nz / nLen,
+    nx / nLen,
+    ny / nLen,
+    nz / nLen,
+    nx / nLen,
+    ny / nLen,
+    nz / nLen,
+    nx / nLen,
+    ny / nLen,
+    nz / nLen,
+    nx / nLen,
+    ny / nLen,
+    nz / nLen,
   ]);
   return {
     type: "triangles",
@@ -218,7 +216,7 @@ export function createDefaultScene(): SerializedScene {
         materialId: 8,
       },
       createCylinderMesh([-8.7, 1.1, -4.8], 0.7, 2.2, 32, 10),
-      createTorusMesh([8.8, 1.2, 4.7], 1.1, 0.32, 24, 36, 9),
+      createTorusMesh([8.8, 1.2, 4.7], 1.1, 0.32, 48, 48, 9),
       createCylinderMesh([4.6, 0.85, 5.6], 0.5, 1.7, 28, 6),
       createTorusMesh([-4.7, 1.05, 4.8], 0.9, 0.22, 20, 30, 10),
       createQuadMesh(
@@ -228,7 +226,7 @@ export function createDefaultScene(): SerializedScene {
           [10.5, 4.8, 9.5],
           [10.5, 4.8, -5.5],
         ],
-        11
+        11,
       ),
       createQuadMesh(
         [
@@ -237,7 +235,7 @@ export function createDefaultScene(): SerializedScene {
           [10.5, 4.8, 9.5],
           [-4.5, 4.8, 9.5],
         ],
-        12
+        12,
       ),
     ],
   };
