@@ -1,56 +1,162 @@
 # WebGL2 Static Ray Tracer
 
-Interactive Babylon.js preview + CPU path tracer (Web Worker) with WebGL2 overlay display.
+A browser-based static ray tracer built with TypeScript, Vite, Babylon.js, WebGL2, and Web Workers.
 
-## Run
+The app combines a real-time Babylon.js preview with an on-demand CPU ray tracer. You navigate the scene in the preview, launch a render, and inspect the ray-traced result as a WebGL overlay or as exported images.
+
+## Stack
+
+- TypeScript
+- Vite
+- Babylon.js for scene preview and GLB loading
+- WebGL2 for presenting the ray-traced framebuffer
+- Web Workers for parallel CPU rendering
+
+## Getting Started
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Workflow
+Other scripts:
 
-- Orbit the scene in Babylon preview.
-- Click `Render` to start worker path tracing.
-- Preview camera controls are frozen during render.
-- Progressive tile updates are shown as the render converges.
-- Final raytraced image is shown as an overlay over the Babylon preview.
+```bash
+npm run build
+npm run preview
+npm run lint
+```
+
+## How It Works
+
+1. The Babylon.js viewport is used for camera navigation and scene preview.
+2. Press `Render` to serialize the current scene and camera into worker jobs.
+3. Workers ray trace horizontal regions in parallel and stream partial tile updates.
+4. The final RGBA image is presented through a WebGL2 canvas layered above the preview.
+5. The overlay opacity can be adjusted with `Mix (RT overlay)`.
+
+Rendering is static and explicit. There is no continuous progressive render loop after completion.
+
+## Features
+
+- Babylon.js orbit preview with synchronized ray-trace camera
+- Multi-worker rendering with selectable worker count
+- Tile-based partial updates during rendering
+- Default scene with spheres, boxes, cylinders, tori, and wall quads
+- GLB import by button or drag-and-drop
+- Optional GLB material-to-ray-material mapping
+- Texture-aware GLB material import for:
+  - base color
+  - emissive
+  - metallic / roughness
+  - normal maps
+- PNG export of:
+  - pure ray-traced output
+  - preview + ray-trace blend
+  - side-by-side comparison image
+- Compare popup for quick visual inspection
+- Render cancellation and scene reset tools
 
 ## Controls
 
+Current UI controls:
+
 - `Resolution`: `Fullscreen (Canvas)`, `640x360`, `960x540`, `1280x720`
-- `SPP`: samples per pixel (default `4`)
-- `Max bounces`: path depth (default `4`)
-- `Light intensity` (default `0.7`)
-- `Shadow darkness` (default `0.8`)
-- `Firefly clamp` (default `40`)
-- `Firefly suppression` (default `3.0`)
-- `Normal strength` (default `1.0`)
-- `Mix (RT overlay)` (default `0.5`)
-- `Mat mapping (GLB)`: when enabled, imported GLB PBR materials are mapped into the ray scene
+- `SPP`: samples per pixel
+- `Max bounces`: path depth
+- `Workers`: number of render workers
+- `Camera alpha`: preview orbit angle helper
+- `Light intensity`
+- `Shadow darkness`
+- `Firefly clamp`
+- `Firefly mode`: `mild`, `strong`, `brutal`
+- `Firefly suppression`
+- `Specular spike clamp`
+- `Extreme spike kill`
+- `Soft cleanup`
+- `Mesh emissive min area`
+- `Box emissive`
+- `Normal strength`
+- `Mix (RT overlay)`
+- `Mat mapping (GLB)`: preserve imported material properties instead of forcing a default material
 
-## Import / Export
+Action buttons:
 
-- `Import GLB` button or drag-and-drop `.glb` onto the viewport.
-- `Export PNG`: exports pure raytraced output (`render.png`).
-- `Export mix`: exports current preview + overlay blend (`render-mix.png`).
+- `Render`
+- `Cancel`
+- `Reset Scene`
+- `Remove sample meshes`
+- `Import GLB`
+- `Export PNG`
+- `Export mix`
+- `2Compare`
+- `Open`
 
-## GLB Material Support
+## GLB Import
 
-- Uses the same Babylon-imported meshes for preview and serialized ray scene.
-- Preserves per-primitive/per-submesh material assignment.
-- Maps PBR factors:
-  - `baseColorFactor`
-  - `metallicFactor`
-  - `roughnessFactor`
-- Samples textures in the worker BRDF:
-  - base color texture (UV transform + wrap)
-  - metallic/roughness texture (G/B channels)
-  - normal map (with global `Normal strength` multiplier)
+The renderer imports `.glb` meshes into the preview scene and converts supported mesh data into serialized triangle geometry for the worker renderer.
+
+Supported material mapping paths include:
+
+- `PBRMetallicRoughnessMaterial`
+- `PBRMaterial`
+- `StandardMaterial`
+
+Imported data can include:
+
+- world-space triangle positions
+- normals
+- UV0 / UV1
+- per-mesh or per-submesh material assignment
+- texture transforms
+- wrap modes
+
+If `Mat mapping (GLB)` is disabled, imported geometry is still used, but all imported meshes share one default diffuse-style material in the ray scene.
+
+## Export Modes
+
+- `Export PNG`: saves the pure ray-traced framebuffer as `render.png`
+- `Export mix`: saves the current preview and overlay blend as `render-mix.png`
+- `2Compare`: saves a side-by-side preview vs mixed-render image as `2compare.png`
+- `Open`: opens the comparison image in an in-app popup overlay
+
+## Default Scene
+
+The built-in sample scene includes:
+
+- a ground plane
+- multiple spheres with varied metallic/roughness values
+- several boxes, including an emissive sample box
+- procedurally generated cylinders
+- procedurally generated tori
+- large quad walls for additional shading variation
+
+## Project Structure
+
+```text
+src/
+  gl/
+    glDisplay.ts
+    shaders/
+  raytracer/
+    bvh.ts
+    math.ts
+    raytracer.ts
+  scene/
+    defaultScene.ts
+    glbImport.ts
+    types.ts
+  ui/
+    controls.ts
+    state.ts
+  workers/
+    rayWorker.ts
+  main.ts
+```
 
 ## Notes
 
-- Rendering is static/on-demand (no continuous path tracing loop).
-- `Cancel` stops the active worker job.
-- Denoising (A-Trous) and firefly suppression are applied after accumulation.
+- Camera controls are detached while a render job is active.
+- Cancelling a render stops active worker jobs.
+- The result overlay remains visible after a completed render until hidden or replaced.
+- Post-processing includes firefly control and cleanup tuned through the UI.
