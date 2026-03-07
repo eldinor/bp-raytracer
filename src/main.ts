@@ -32,12 +32,19 @@ style.textContent = `
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: "Segoe UI", sans-serif; background: #111; }
   #viewport { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; }
   #ui { position: fixed; top: 12px; left: 12px; color: #f4f4f4; z-index: 10; }
-  .panel { display: grid; gap: 4px; width: 220px; padding: 8px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
-  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 4px 6px; }
+  .panel { display: grid; gap: 3px; width: 220px; padding: 6px; border-radius: 10px; background: rgba(18,20,24,0.9); border: 1px solid rgba(255,255,255,0.12); }
+  .panel button, .panel input, .panel select { background: #262b33; color: #f4f4f4; border: 1px solid #4a5260; border-radius: 6px; padding: 3px 6px; }
   .panel input[type="range"] { padding: 0; }
   .panel button { cursor: pointer; }
-  .row-label { font-size: 11px; color: #c4ccd9; line-height: 1.1; }
-  .status { margin-top: 2px; font-size: 12px; color: #9ed67c; }
+  .row-label { font-size: 10px; color: #c4ccd9; line-height: 1; }
+  .button-row { display: grid; gap: 3px; }
+  .button-row.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .button-row.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .status { margin-top: 1px; font-size: 11px; color: #9ed67c; display: flex; justify-content: space-between; gap: 8px; }
+  .compare-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,0.82); z-index: 30; }
+  .compare-overlay.open { display: flex; }
+  .compare-dialog { position: relative; max-width: min(96vw, 1280px); max-height: 92vh; padding: 8px; border-radius: 10px; background: rgba(18,20,24,0.96); border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
+  .compare-dialog img { display: block; max-width: 100%; max-height: calc(92vh - 16px); object-fit: contain; }
 `;
 document.head.appendChild(style);
 
@@ -52,13 +59,23 @@ resultCanvas.style.display = "none";
 resultCanvas.style.opacity = "1";
 document.body.appendChild(resultCanvas);
 
+const compareOverlay = document.createElement("div");
+compareOverlay.className = "compare-overlay";
+const compareDialog = document.createElement("div");
+compareDialog.className = "compare-dialog";
+const compareImage = document.createElement("img");
+compareImage.alt = "2Compare preview";
+compareDialog.appendChild(compareImage);
+compareOverlay.appendChild(compareDialog);
+document.body.appendChild(compareOverlay);
+
 const display = new GLDisplay(resultCanvas);
 
 const engine = new Engine(previewCanvas, true, { preserveDrawingBuffer: true, stencil: true });
 const previewScene = new Scene(engine);
 previewScene.useRightHandedSystem = true;
 previewScene.clearColor.set(0.05, 0.06, 0.08, 1);
-const camera = new ArcRotateCamera("camera", 0.25, 1.2, 8, new Vector3(0, 1, 0), previewScene);
+const camera = new ArcRotateCamera("camera", -2.5, 1.2, 8, new Vector3(0, 1, 0), previewScene);
 camera.attachControl(previewCanvas, true);
 camera.lowerRadiusLimit = 1.5;
 camera.upperRadiusLimit = 30;
@@ -79,7 +96,10 @@ function makeMaterial(sceneData: SerializedScene, materialId: number): PBRMetall
   const m = new PBRMetallicRoughnessMaterial(`mat-${materialId}-${Math.random().toString(36).slice(2)}`, previewScene);
   const mat = sceneData.materials[materialId];
   const c = mat?.baseColor ?? [0.8, 0.8, 0.8];
+  const e = mat?.emissive ?? [0, 0, 0];
+  m.backFaceCulling = false;
   m.baseColor = new Color3(c[0], c[1], c[2]);
+  m.emissiveColor = new Color3(e[0], e[1], e[2]);
   m.metallic = Math.max(0, Math.min(1, mat?.metallic ?? 0));
   m.roughness = Math.max(0.04, Math.min(1, mat?.roughness ?? 0.7));
   return m;
@@ -144,6 +164,12 @@ async function loadGlbPreview(file: File): Promise<AbstractMesh[]> {
   try {
     const result = await SceneLoader.ImportMeshAsync(undefined, "", url, previewScene, undefined, ".glb");
     const meshes = result.meshes.filter((m) => m.name !== "__root__");
+    for (const mesh of meshes) {
+      const material = mesh.material;
+      if (material) {
+        material.backFaceCulling = false;
+      }
+    }
     importedPreviewMeshes.push(...meshes);
     return meshes;
   } finally {
@@ -171,17 +197,30 @@ fileInput.accept = ".glb,model/gltf-binary";
 fileInput.style.display = "none";
 document.body.appendChild(fileInput);
 
+const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 4);
+const maxWorkerCount = Math.max(1, Math.min(8, hardwareThreads * 2));
+const sampleBoxMaterialId = 3;
+const sampleBoxBaseEmissive: [number, number, number] = [1.2, 1.0, 0.35];
+
 const state: AppState = {
   jobId: 0,
   renderingJobId: null,
   status: "Idle",
   resolution: "fullscreen",
+  cameraAlpha: -2.5,
   glbMatMapping: true,
   lightIntensity: 0.7,
   shadowDarkness: 0.8,
   fireflyClamp: 40,
+  fireflyMode: "strong",
   fireflySuppression: 3.0,
+  specularSpikeClamp: 4.5,
+  extremeSpikeKill: 1.0,
+  softCleanup: 0,
+  emissiveTriangleThreshold: 0.02,
+  sampleBoxEmissiveIntensity: 0.5,
   normalStrength: 1.0,
+  workerCount: Math.min(maxWorkerCount, 8),
   blendMix: 0.5,
   spp: 4,
   maxBounces: 4,
@@ -197,8 +236,22 @@ const state: AppState = {
 rebuildPreview(state.scene);
 applyPreviewLightIntensity(state.lightIntensity);
 
-const worker = new Worker(new URL("./workers/rayWorker.ts", import.meta.url), { type: "module" });
-worker.postMessage({ type: "init" });
+type WorkerRenderState = {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+  completedWorkers: number;
+  activeWorkers: number;
+  workerSamples: number[];
+  workerSpps: number[];
+};
+
+const workers = Array.from({ length: maxWorkerCount }, () => new Worker(new URL("./workers/rayWorker.ts", import.meta.url), { type: "module" }));
+for (const worker of workers) {
+  worker.postMessage({ type: "init" });
+}
+let activeRenderState: WorkerRenderState | null = null;
+let renderStartTime = 0;
 
 let controls: ReturnType<typeof createControls>;
 let controlsFrozen = false;
@@ -206,6 +259,10 @@ let controlsFrozen = false;
 function setStatus(status: UiStatus): void {
   state.status = status;
   controls.setStatus(status);
+}
+
+function setRenderTime(ms: number | null): void {
+  controls.setRenderTime(ms);
 }
 
 function parseResolution(value: ResolutionOption): [number, number] {
@@ -243,7 +300,11 @@ function sendCancel(withStatus?: UiStatus): void {
   if (state.renderingJobId == null) {
     return;
   }
-  worker.postMessage({ type: "cancel", jobId: state.renderingJobId });
+  for (const worker of workers) {
+    worker.postMessage({ type: "cancel", jobId: state.renderingJobId });
+  }
+  activeRenderState = null;
+  renderStartTime = 0;
   setControlsFrozen(false);
   if (withStatus) {
     setStatus(withStatus);
@@ -256,11 +317,139 @@ function applyBlendMix(mix: number): void {
   resultCanvas.style.opacity = clamped.toString();
 }
 
+function copyRegionIntoFrame(
+  target: Uint8Array,
+  fullWidth: number,
+  region: Uint8Array,
+  offsetX: number,
+  offsetY: number,
+  regionWidth: number,
+  regionHeight: number
+): void {
+  for (let y = 0; y < regionHeight; y++) {
+    const srcStart = y * regionWidth * 4;
+    const dstStart = ((offsetY + y) * fullWidth + offsetX) * 4;
+    target.set(region.subarray(srcStart, srcStart + regionWidth * 4), dstStart);
+  }
+}
+
+function removeSampleMeshesFromScene(sceneData: SerializedScene): SerializedScene {
+  return {
+    ...sceneData,
+    objects: sceneData.objects.filter((obj) => obj.type === "triangles"),
+  };
+}
+
+function renderMixedCanvas(width: number, height: number): HTMLCanvasElement | null {
+  const c = document.createElement("canvas");
+  c.width = width;
+  c.height = height;
+  const ctx = c.getContext("2d");
+  if (!ctx) {
+    return null;
+  }
+
+  previewScene.render();
+  ctx.globalAlpha = 1;
+  ctx.drawImage(previewCanvas, 0, 0, width, height);
+  if (state.lastRender && resultCanvas.style.display !== "none") {
+    const rtCanvas = document.createElement("canvas");
+    rtCanvas.width = state.lastRender.width;
+    rtCanvas.height = state.lastRender.height;
+    const rtCtx = rtCanvas.getContext("2d");
+    if (!rtCtx) {
+      return null;
+    }
+    rtCtx.putImageData(
+      new ImageData(
+        new Uint8ClampedArray(state.lastRender.rgba.buffer.slice(0)),
+        state.lastRender.width,
+        state.lastRender.height
+      ),
+      0,
+      0
+    );
+    ctx.globalAlpha = Math.max(0, Math.min(1, state.blendMix));
+    ctx.drawImage(rtCanvas, 0, 0, width, height);
+    ctx.globalAlpha = 1;
+  }
+
+  return c;
+}
+
+function buildCompareCanvas(): HTMLCanvasElement | null {
+  const totalWidth = 1280;
+  const paneWidth = totalWidth / 2;
+  const aspect = Math.max(1, previewCanvas.height) / Math.max(1, previewCanvas.width);
+  const paneHeight = Math.max(1, Math.round(paneWidth * aspect));
+
+  previewScene.render();
+  const compareCanvas = document.createElement("canvas");
+  compareCanvas.width = totalWidth;
+  compareCanvas.height = paneHeight;
+  const compareCtx = compareCanvas.getContext("2d");
+  if (!compareCtx) {
+    return null;
+  }
+
+  compareCtx.fillStyle = "#111";
+  compareCtx.fillRect(0, 0, totalWidth, paneHeight);
+  compareCtx.drawImage(previewCanvas, 0, 0, paneWidth, paneHeight);
+
+  const mixCanvas = renderMixedCanvas(paneWidth, paneHeight);
+  if (!mixCanvas) {
+    return null;
+  }
+  compareCtx.drawImage(mixCanvas, paneWidth, 0, paneWidth, paneHeight);
+  return compareCanvas;
+}
+
+function downloadCanvas(canvas: HTMLCanvasElement, filename: string): void {
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+}
+
+function closeComparePopup(): void {
+  compareOverlay.classList.remove("open");
+  compareImage.removeAttribute("src");
+}
+
+function setSampleBoxEmissiveIntensity(sceneData: SerializedScene, intensity: number): SerializedScene {
+  const mat = sceneData.materials[sampleBoxMaterialId];
+  if (!mat) {
+    return sceneData;
+  }
+  const clamped = Math.max(0, Math.min(3, intensity));
+  const materials = sceneData.materials.slice();
+  materials[sampleBoxMaterialId] = {
+    ...mat,
+    emissive: [
+      sampleBoxBaseEmissive[0] * clamped,
+      sampleBoxBaseEmissive[1] * clamped,
+      sampleBoxBaseEmissive[2] * clamped,
+    ],
+  };
+  return {
+    ...sceneData,
+    materials,
+  };
+}
+
 async function importGlbFile(file: File): Promise<void> {
   state.glbMatMapping = controls.getGlbMatMapping();
   try {
     const meshes = await loadGlbPreview(file);
     state.scene = await importGlbIntoScene(meshes, state.scene, { mapMaterials: state.glbMatMapping });
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, state.sampleBoxEmissiveIntensity);
   } catch (err) {
     console.warn("GLB import failed:", err);
     throw err;
@@ -275,39 +464,76 @@ controls = createControls(ui, {
     state.jobId += 1;
     state.renderingJobId = state.jobId;
     state.resolution = controls.getResolution();
+    state.cameraAlpha = controls.getCameraAlpha();
     state.lightIntensity = controls.getLightIntensity();
     state.shadowDarkness = controls.getShadowDarkness();
     state.fireflyClamp = controls.getFireflyClamp();
+    state.fireflyMode = controls.getFireflyMode();
     state.fireflySuppression = controls.getFireflySuppression();
+    state.specularSpikeClamp = controls.getSpecularSpikeClamp();
+    state.extremeSpikeKill = controls.getExtremeSpikeKill();
+    state.softCleanup = controls.getSoftCleanup();
+    state.emissiveTriangleThreshold = controls.getEmissiveTriangleThreshold();
+    state.sampleBoxEmissiveIntensity = controls.getSampleBoxEmissiveIntensity();
     state.normalStrength = controls.getNormalStrength();
+    state.workerCount = controls.getWorkerCount();
     state.spp = controls.getSpp();
     state.maxBounces = controls.getMaxBounces();
     applyPreviewLightIntensity(state.lightIntensity);
     applyBlendMix(state.blendMix);
     syncRayCameraFromPreview();
     const [width, height] = parseResolution(state.resolution);
+    renderStartTime = performance.now();
+    setRenderTime(null);
+    activeRenderState = {
+      width,
+      height,
+      rgba: new Uint8Array(width * height * 4),
+      completedWorkers: 0,
+      activeWorkers: state.workerCount,
+      workerSamples: new Array(maxWorkerCount).fill(0),
+      workerSpps: new Array(maxWorkerCount).fill(0)
+    };
     setControlsFrozen(true);
     setStatus("Rendering...");
     resultCanvas.style.display = "block";
     display.beginFrame(width, height);
     display.present();
-    worker.postMessage({
-      type: "render",
-      jobId: state.jobId,
-      width,
-      height,
-      spp: state.spp,
-      maxBounces: state.maxBounces,
-      lightIntensity: state.lightIntensity,
-      shadowDarkness: state.shadowDarkness,
-      fireflyClamp: state.fireflyClamp,
-      fireflySuppression: state.fireflySuppression,
-      normalStrength: state.normalStrength,
-      tileSize: 32,
-      partialInterval: 4,
-      camera: state.camera,
-      scene: state.scene,
-    });
+    for (let i = 0; i < state.workerCount; i++) {
+      const startY = Math.floor((height * i) / state.workerCount);
+      const endY = Math.floor((height * (i + 1)) / state.workerCount);
+      const regionHeight = Math.max(0, endY - startY);
+      if (regionHeight <= 0) {
+        activeRenderState.completedWorkers += 1;
+        continue;
+      }
+      workers[i].postMessage({
+        type: "render",
+        jobId: state.jobId,
+        width,
+        height,
+        offsetX: 0,
+        offsetY: startY,
+        regionWidth: width,
+        regionHeight,
+        spp: state.spp,
+        maxBounces: state.maxBounces,
+        lightIntensity: state.lightIntensity,
+        shadowDarkness: state.shadowDarkness,
+        fireflyClamp: state.fireflyClamp,
+        fireflyMode: state.fireflyMode,
+        fireflySuppression: state.fireflySuppression,
+        specularSpikeClamp: state.specularSpikeClamp,
+        extremeSpikeKill: state.extremeSpikeKill,
+        softCleanup: state.softCleanup,
+        emissiveTriangleThreshold: state.emissiveTriangleThreshold,
+        normalStrength: state.normalStrength,
+        tileSize: 32,
+        partialInterval: 4,
+        camera: state.camera,
+        scene: state.scene,
+      });
+    }
   },
   onCancel: () => {
     if (state.renderingJobId != null) {
@@ -320,8 +546,19 @@ controls = createControls(ui, {
   },
   onResetScene: () => {
     sendCancel("Cancelled");
+    setRenderTime(null);
     state.scene = createDefaultScene();
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, state.sampleBoxEmissiveIntensity);
     clearImportedPreviewMeshes();
+    rebuildPreview(state.scene);
+    resultCanvas.style.display = "none";
+    setControlsFrozen(false);
+    setStatus("Idle");
+  },
+  onRemoveSampleMeshes: () => {
+    sendCancel("Cancelled");
+    setRenderTime(null);
+    state.scene = removeSampleMeshesFromScene(state.scene);
     rebuildPreview(state.scene);
     resultCanvas.style.display = "none";
     setControlsFrozen(false);
@@ -360,48 +597,30 @@ controls = createControls(ui, {
   onExportMix: () => {
     const w = Math.max(1, previewCanvas.width);
     const h = Math.max(1, previewCanvas.height);
-    const c = document.createElement("canvas");
-    c.width = w;
-    c.height = h;
-    const ctx = c.getContext("2d");
-    if (!ctx) {
+    const c = renderMixedCanvas(w, h);
+    if (!c) {
       return;
     }
-    previewScene.render();
-    ctx.globalAlpha = 1;
-    ctx.drawImage(previewCanvas, 0, 0, w, h);
-    if (state.lastRender && resultCanvas.style.display !== "none") {
-      const rtCanvas = document.createElement("canvas");
-      rtCanvas.width = state.lastRender.width;
-      rtCanvas.height = state.lastRender.height;
-      const rtCtx = rtCanvas.getContext("2d");
-      if (!rtCtx) {
-        return;
-      }
-      rtCtx.putImageData(
-        new ImageData(
-          new Uint8ClampedArray(state.lastRender.rgba.buffer.slice(0)),
-          state.lastRender.width,
-          state.lastRender.height
-        ),
-        0,
-        0
-      );
-      ctx.globalAlpha = Math.max(0, Math.min(1, state.blendMix));
-      ctx.drawImage(rtCanvas, 0, 0, w, h);
-      ctx.globalAlpha = 1;
+    downloadCanvas(c, "render-mix.png");
+  },
+  onExportCompare: () => {
+    const compareCanvas = buildCompareCanvas();
+    if (!compareCanvas) {
+      return;
     }
-    c.toBlob((blob) => {
-      if (!blob) {
-        return;
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "render-mix.png";
-      a.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+    downloadCanvas(compareCanvas, "2compare.png");
+  },
+  onOpenComparePopup: () => {
+    const compareCanvas = buildCompareCanvas();
+    if (!compareCanvas) {
+      return;
+    }
+    compareImage.src = compareCanvas.toDataURL("image/png");
+    compareOverlay.classList.add("open");
+  },
+  onCameraAlphaChange: (value) => {
+    state.cameraAlpha = value;
+    camera.alpha = value;
   },
   onLightIntensityChange: (value) => {
     state.lightIntensity = value;
@@ -419,10 +638,27 @@ controls = createControls(ui, {
   onFireflySuppressionChange: (value) => {
     state.fireflySuppression = value;
   },
+  onSpecularSpikeClampChange: (value) => {
+    state.specularSpikeClamp = value;
+  },
+  onExtremeSpikeKillChange: (value) => {
+    state.extremeSpikeKill = value;
+  },
+  onSoftCleanupChange: (value) => {
+    state.softCleanup = value;
+  },
+  onEmissiveTriangleThresholdChange: (value) => {
+    state.emissiveTriangleThreshold = value;
+  },
+  onSampleBoxEmissiveIntensityChange: (value) => {
+    state.sampleBoxEmissiveIntensity = value;
+    state.scene = setSampleBoxEmissiveIntensity(state.scene, value);
+    rebuildPreview(state.scene);
+  },
   onNormalStrengthChange: (value) => {
     state.normalStrength = value;
   },
-});
+}, { maxWorkers: maxWorkerCount });
 
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files?.[0];
@@ -464,53 +700,98 @@ camera.onViewMatrixChangedObservable.add(() => {
   }
 });
 
-worker.onmessage = (ev: MessageEvent<any>) => {
-  const msg = ev.data;
-  if (msg.type === "partial") {
-    if (msg.jobId !== state.renderingJobId) {
-      return;
-    }
-    const rgba = new Uint8Array(msg.rgba);
-    display.updateTile(msg.x, msg.y, msg.width, msg.height, rgba);
-    display.present();
-    return;
-  }
-  if (msg.type === "progress") {
-    if (msg.jobId === state.renderingJobId) {
-      controls.setProgress(msg.sample, msg.spp);
-    }
-    return;
-  }
-  if (msg.type === "result") {
-    if (msg.jobId !== state.renderingJobId) {
-      return;
-    }
-    const rgba = new Uint8Array(msg.rgba);
-    resultCanvas.style.display = "block";
-    display.displayRGBA(msg.width, msg.height, rgba);
-    state.lastRender = { width: msg.width, height: msg.height, rgba };
-    state.renderingJobId = null;
-    setControlsFrozen(true);
-    setStatus("Done");
-    return;
-  }
-  if (msg.type === "error") {
-    if (msg.jobId !== state.renderingJobId) {
-      return;
-    }
-    state.renderingJobId = null;
-    setControlsFrozen(false);
-    if (msg.message === "cancelled") {
-      if (state.status !== "Cancelled (camera changed)") {
-        setStatus("Cancelled");
-      } else {
-        controls.setStatus("Cancelled (camera changed)");
+workers.forEach((worker, workerIndex) => {
+  worker.onmessage = (ev: MessageEvent<any>) => {
+    const msg = ev.data;
+    if (msg.type === "partial") {
+      if (msg.jobId !== state.renderingJobId || !activeRenderState) {
+        return;
       }
-    } else {
-      console.error("Render failed:", msg.message);
-      setStatus("Cancelled");
+      const rgba = new Uint8Array(msg.rgba);
+      display.updateTile(msg.x, msg.y, msg.width, msg.height, rgba);
+      display.present();
+      return;
     }
+    if (msg.type === "progress") {
+      if (msg.jobId === state.renderingJobId && activeRenderState) {
+        activeRenderState.workerSamples[workerIndex] = msg.sample;
+        activeRenderState.workerSpps[workerIndex] = msg.spp;
+        const activeWorkers = Math.max(1, activeRenderState.activeWorkers);
+        const avgSample =
+          activeRenderState.workerSamples.slice(0, activeWorkers).reduce((sum, value) => sum + value, 0) / activeWorkers;
+        const avgSpp =
+          activeRenderState.workerSpps.slice(0, activeWorkers).reduce((sum, value) => sum + value, 0) / activeWorkers;
+        controls.setProgress(Math.round(avgSample), Math.round(avgSpp));
+        if (renderStartTime > 0) {
+          setRenderTime(performance.now() - renderStartTime);
+        }
+      }
+      return;
+    }
+    if (msg.type === "result") {
+      if (msg.jobId !== state.renderingJobId || !activeRenderState) {
+        return;
+      }
+      const rgba = new Uint8Array(msg.rgba);
+      copyRegionIntoFrame(
+        activeRenderState.rgba,
+        activeRenderState.width,
+        rgba,
+        msg.offsetX ?? 0,
+        msg.offsetY ?? 0,
+        msg.regionWidth ?? msg.width,
+        msg.regionHeight ?? msg.height
+      );
+      activeRenderState.completedWorkers += 1;
+      if (activeRenderState.completedWorkers >= activeRenderState.activeWorkers) {
+        resultCanvas.style.display = "block";
+        display.displayRGBA(activeRenderState.width, activeRenderState.height, activeRenderState.rgba);
+        state.lastRender = {
+          width: activeRenderState.width,
+          height: activeRenderState.height,
+          rgba: new Uint8Array(activeRenderState.rgba)
+        };
+        setRenderTime(renderStartTime > 0 ? performance.now() - renderStartTime : null);
+        renderStartTime = 0;
+        activeRenderState = null;
+        state.renderingJobId = null;
+        setControlsFrozen(true);
+        setStatus("Done");
+      }
+      return;
+    }
+    if (msg.type === "error") {
+      if (msg.jobId !== state.renderingJobId) {
+        return;
+      }
+      activeRenderState = null;
+      renderStartTime = 0;
+      state.renderingJobId = null;
+      setControlsFrozen(false);
+      if (msg.message === "cancelled") {
+        if (state.status !== "Cancelled (camera changed)") {
+          setStatus("Cancelled");
+        } else {
+          controls.setStatus("Cancelled (camera changed)");
+        }
+      } else {
+        console.error("Render failed:", msg.message);
+        setStatus("Cancelled");
+      }
+    }
+  };
+});
+
+compareOverlay.addEventListener("click", (e) => {
+  if (e.target === compareOverlay) {
+    closeComparePopup();
   }
-};
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && compareOverlay.classList.contains("open")) {
+    closeComparePopup();
+  }
+});
 
 setStatus("Idle");

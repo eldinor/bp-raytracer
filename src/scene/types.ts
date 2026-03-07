@@ -18,9 +18,11 @@ export type MaterialTextureRef = {
 
 export type DiffuseMaterial = {
   baseColor: Vec3;
+  emissive?: Vec3;
   metallic?: number;
   roughness?: number;
   baseColorTexture?: MaterialTextureRef;
+  emissiveTexture?: MaterialTextureRef;
   metallicRoughnessTexture?: MaterialTextureRef;
   normalTexture?: MaterialTextureRef;
   normalScale?: number;

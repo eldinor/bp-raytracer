@@ -225,8 +225,8 @@ export class TriangleBvh {
         const faceN = cross(dPos1, dPos2);
         const faceNLen = Math.hypot(faceN[0], faceN[1], faceN[2]) || 1;
         const nFace: Vec3 = [faceN[0] / faceNLen, faceN[1] / faceNLen, faceN[2] / faceNLen];
-        let tangent: Vec3 = [1, 0, 0];
-        let bitangent: Vec3 = [0, 0, 1];
+        let tangent: Vec3;
+        let bitangent: Vec3;
         if (Math.abs(det) > 1e-8) {
           const invDet = 1 / det;
           tangent = [
