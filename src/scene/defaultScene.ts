@@ -125,20 +125,66 @@ function createTorusMesh(
   };
 }
 
+function createQuadMesh(
+  corners: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+    [number, number, number]
+  ],
+  materialId: number
+): TriangleMesh {
+  const positions = new Float32Array([
+    ...corners[0],
+    ...corners[1],
+    ...corners[2],
+    ...corners[3],
+  ]);
+  const edgeA: [number, number, number] = [
+    corners[1][0] - corners[0][0],
+    corners[1][1] - corners[0][1],
+    corners[1][2] - corners[0][2],
+  ];
+  const edgeB: [number, number, number] = [
+    corners[2][0] - corners[0][0],
+    corners[2][1] - corners[0][1],
+    corners[2][2] - corners[0][2],
+  ];
+  const nx = edgeA[1] * edgeB[2] - edgeA[2] * edgeB[1];
+  const ny = edgeA[2] * edgeB[0] - edgeA[0] * edgeB[2];
+  const nz = edgeA[0] * edgeB[1] - edgeA[1] * edgeB[0];
+  const nLen = Math.hypot(nx, ny, nz) || 1;
+  const normals = new Float32Array([
+    nx / nLen, ny / nLen, nz / nLen,
+    nx / nLen, ny / nLen, nz / nLen,
+    nx / nLen, ny / nLen, nz / nLen,
+    nx / nLen, ny / nLen, nz / nLen,
+  ]);
+  return {
+    type: "triangles",
+    positions,
+    normals,
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+    materialId,
+  };
+}
+
 export function createDefaultScene(): SerializedScene {
   return {
     materials: [
       { baseColor: [0.9, 0.18, 0.18], metallic: 0.08, roughness: 0.36 },
       { baseColor: [0.18, 0.88, 0.26], metallic: 0.0, roughness: 0.58 },
-      { baseColor: [0.18, 0.32, 0.94], metallic: 0.88, roughness: 0.18 },
+      { baseColor: [0.2, 0.36, 0.9], metallic: 0.72, roughness: 0.24 },
       { baseColor: [0.9, 0.9, 0.2], emissive: [0.6, 0.5, 0.175], metallic: 0.85, roughness: 0.2 },
       { baseColor: [0.75, 0.75, 0.75], metallic: 0.0, roughness: 0.9 },
-      { baseColor: [0.92, 0.9, 0.82], metallic: 1.0, roughness: 0.04 },
-      { baseColor: [0.64, 0.79, 0.9], metallic: 1.0, roughness: 0.22 },
+      { baseColor: [0.9, 0.82, 0.62], metallic: 0.82, roughness: 0.12 },
+      { baseColor: [0.62, 0.78, 0.88], metallic: 0.78, roughness: 0.28 },
       { baseColor: [0.96, 0.52, 0.14], metallic: 0.0, roughness: 0.1 },
-      { baseColor: [0.34, 0.38, 0.44], metallic: 0.82, roughness: 0.76 },
-      { baseColor: [0.94, 0.36, 0.74], metallic: 1.0, roughness: 0.08 },
-      { baseColor: [0.18, 0.88, 0.82], metallic: 1.0, roughness: 0.32 },
+      { baseColor: [0.22, 0.56, 0.78], metallic: 0.28, roughness: 0.38 },
+      { baseColor: [0.88, 0.42, 0.72], metallic: 0.8, roughness: 0.16 },
+      { baseColor: [0.24, 0.86, 0.8], metallic: 0.72, roughness: 0.34 },
+      { baseColor: [0.88, 0.72, 0.62], metallic: 0.0, roughness: 0.94 },
+      { baseColor: [0.58, 0.74, 0.9], metallic: 0.12, roughness: 0.62 },
     ],
     objects: [
       { type: "plane", normal: [0, 1, 0], d: 0, materialId: 4 },
@@ -175,6 +221,24 @@ export function createDefaultScene(): SerializedScene {
       createTorusMesh([8.8, 1.2, 4.7], 1.1, 0.32, 24, 36, 9),
       createCylinderMesh([4.6, 0.85, 5.6], 0.5, 1.7, 28, 6),
       createTorusMesh([-4.7, 1.05, 4.8], 0.9, 0.22, 20, 30, 10),
+      createQuadMesh(
+        [
+          [10.5, 0, -5.5],
+          [10.5, 0, 9.5],
+          [10.5, 4.8, 9.5],
+          [10.5, 4.8, -5.5],
+        ],
+        11
+      ),
+      createQuadMesh(
+        [
+          [-4.5, 0, 9.5],
+          [10.5, 0, 9.5],
+          [10.5, 4.8, 9.5],
+          [-4.5, 4.8, 9.5],
+        ],
+        12
+      ),
     ],
   };
 }
